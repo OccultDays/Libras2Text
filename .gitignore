@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.task
+node_modules/
+.expo/
+dist/
+web-build/
