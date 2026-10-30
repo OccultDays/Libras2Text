@@ -19,7 +19,12 @@
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
-      "permissions": ["CAMERA"]
+      "permissions": [
+        "CAMERA",
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
+      ],
+      "package": "com.anonymous.aplicativo"
     },
     "plugins": [
       [
@@ -27,7 +32,8 @@
         {
           "cameraPermission": "Precisamos de acesso a camera para reconhecer os sinais de Libras."
         }
-      ]
+      ],
+      "expo-status-bar"
     ],
     "web": {
       "favicon": "./assets/favicon.png"

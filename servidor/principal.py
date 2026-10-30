@@ -55,11 +55,14 @@ from collections import deque
 async def rota_websocket(websocket: WebSocket):
     await gerenciador.conectar(websocket)
     historico_marcos = deque(maxlen=10)
+    quadros_sem_deteccao = 0
     try:
         while True:
-            mensagem = await websocket.receive_text()
+            quadro_recebido = await websocket.receive()
             inicio = time.time()
 
+            bytes_imagem = quadro_recebido.get("bytes")
+            mensagem = quadro_recebido.get("text") or ""
             imagem_base64 = mensagem
             if mensagem.startswith("{"):
                 import json
@@ -67,12 +70,17 @@ async def rota_websocket(websocket: WebSocket):
                     dados_json = json.loads(mensagem)
                     if dados_json.get("tipo") == "limpar_buffer":
                         historico_marcos.clear()
+                        quadros_sem_deteccao = 0
                         continue
                     imagem_base64 = dados_json.get("imagem") or dados_json.get("frame") or ""
                 except Exception:
                     pass
 
-            imagem_bgr = ProcessadorImagem.decodificar_base64(imagem_base64)
+            imagem_bgr = (
+                ProcessadorImagem.decodificar_bytes(bytes_imagem)
+                if bytes_imagem is not None
+                else ProcessadorImagem.decodificar_base64(imagem_base64)
+            )
             if imagem_bgr is None:
                 await gerenciador.enviar_json(websocket, {
                     "prediction": "",
@@ -83,9 +91,13 @@ async def rota_websocket(websocket: WebSocket):
                 })
                 continue
 
-            marcos_atuais = extrator.extrair_marcos(imagem_bgr)
-            if marcos_atuais is None:
-                historico_marcos.clear()
+            inicio_deteccao = time.perf_counter()
+            resultado_extracao = extrator.extrair_marcos(imagem_bgr)
+            tempo_deteccao_ms = round((time.perf_counter() - inicio_deteccao) * 1000, 2)
+            if resultado_extracao is None:
+                quadros_sem_deteccao += 1
+                if quadros_sem_deteccao >= 5:
+                    historico_marcos.clear()
                 await gerenciador.enviar_json(websocket, {
                     "prediction": "",
                     "confidence": 0.0,
@@ -95,16 +107,29 @@ async def rota_websocket(websocket: WebSocket):
                 })
                 continue
 
+            marcos_atuais = resultado_extracao["vetor"]
+            pontos_pose = resultado_extracao["pontos_pose"]
+            pontos_mao = resultado_extracao["pontos_mao"]
+            pontos_maos = resultado_extracao["pontos_maos"]
+
+            quadros_sem_deteccao = 0
             historico_marcos.append(marcos_atuais)
             marcos_iniciais = historico_marcos[0]
             deslocamento = marcos_atuais - marcos_iniciais
             vetor_temporal = np.concatenate([marcos_atuais, deslocamento])
 
+            inicio_classificacao = time.perf_counter()
             resultado = classificador.prever(vetor_temporal)
+            tempo_classificacao_ms = round((time.perf_counter() - inicio_classificacao) * 1000, 2)
             tempo_ms = round((time.time() - inicio) * 1000, 2)
             resultado["tempo_ms"] = tempo_ms
+            resultado["tempo_deteccao_ms"] = tempo_deteccao_ms
+            resultado["tempo_classificacao_ms"] = tempo_classificacao_ms
             resultado["quadros_buffer"] = len(historico_marcos)
             resultado["status"] = "ok"
+            resultado["pontos_pose"] = pontos_pose
+            resultado["pontos_mao"] = pontos_mao
+            resultado["pontos_maos"] = pontos_maos
 
             await gerenciador.enviar_json(websocket, resultado)
 
@@ -123,14 +148,18 @@ async def traduzir_frame_http(arquivo: UploadFile = File(...)):
     if imagem_bgr is None:
         return {"status": "erro", "mensagem": "Arquivo de imagem invalido"}
 
-    marcos = extrator.extrair_marcos(imagem_bgr)
-    if marcos is None:
+    resultado_extracao = extrator.extrair_marcos(imagem_bgr)
+    if resultado_extracao is None:
         return {"status": "ok", "previsao": "", "confianca": 0.0, "mensagem": "Nenhuma mao detectada"}
 
+    marcos = resultado_extracao["vetor"]
     deslocamento = np.zeros_like(marcos)
     vetor_temporal = np.concatenate([marcos, deslocamento])
     resultado = classificador.prever(vetor_temporal)
     resultado["tempo_ms"] = round((time.time() - inicio) * 1000, 2)
+    resultado["pontos_pose"] = resultado_extracao["pontos_pose"]
+    resultado["pontos_mao"] = resultado_extracao["pontos_mao"]
+    resultado["pontos_maos"] = resultado_extracao["pontos_maos"]
     return resultado
 
 if __name__ == "__main__":

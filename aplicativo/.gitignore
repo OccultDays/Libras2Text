@@ -36,6 +36,10 @@ yarn-error.*
 # typescript
 *.tsbuildinfo
 
-# generated native folders
+# generated native build output; keep Android project sources versioned
 /ios
-/android
+/android/.gradle/
+/android/build/
+/android/app/build/
+/android/app/debug.keystore
+*.apk
