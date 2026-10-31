@@ -1,169 +1,274 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, TextInput, ScrollView, Dimensions, Platform } from 'react-native';
+import { StyleSheet, Text, View, TouchableOpacity, TextInput, ScrollView, Platform, NativeModules } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import * as FileSystem from 'expo-file-system/legacy';
 import { File } from 'expo-file-system';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle, Line } from 'react-native-svg';
 import LibrasNativeCamera from './modules/libras-native';
 import modeloLocal from './assets/modelo_libras_mobile.json';
-import modeloTemporalPiloto from './assets/modelo_libras_temporal_piloto.json';
 
-const modeloTreinadoComDadosReais = modeloLocal?.fonte_dados === 'real';
-const modeloExperimentalDisponivel = modeloTemporalPiloto?.fonte_dados === 'real_publico_experimental';
+const usarCameraNativa = Platform.OS === 'android' && LibrasNativeCamera !== null;
+const JANELA_TEMPORAL_MS = 1100;
 
-function normalizarMaoParaModeloExperimental(pontos) {
-  if (!Array.isArray(pontos) || pontos.length !== 21) return null;
-  const mao = pontos.map((ponto) => Array.isArray(ponto) ? ponto.slice(0, 3).map(Number) : []);
-  if (mao.some((ponto) => ponto.length !== 3 || ponto.some((valor) => !Number.isFinite(valor)))) return null;
-  if (Math.hypot(mao[0][0], mao[0][1]) < 0.02) return null;
-  if (mao.filter((ponto) => Math.hypot(ponto[0], ponto[1]) > 0.02).length < 18) return null;
-  const pulso = mao[0];
-  const relativos = mao.map((ponto) => ponto.map((valor, eixo) => valor - pulso[eixo]));
-  const escala = Math.max(...relativos.map((ponto) => Math.hypot(...ponto)));
-  if (!Number.isFinite(escala) || escala <= 1e-7) return null;
-  return relativos.flatMap((ponto) => ponto.map((valor) => valor / escala));
+function obterIpPadraoServidor() {
+  const urlScript = NativeModules?.SourceCode?.scriptURL || '';
+  const resultado = urlScript.match(/^https?:\/\/(\d+\.\d+\.\d+\.\d+)/);
+  if (resultado && resultado[1] && resultado[1] !== '127.0.0.1') {
+    return resultado[1];
+  }
+  return '192.168.0.16';
 }
 
-function preverModeloTemporalPiloto(modelo, quadros) {
-  const quantidade = modelo?.quantidade_caracteristicas || 0;
-  if (!modelo || quadros.length !== modelo.frames || quantidade !== modelo.media.length) {
-    return { prediction: '', confidence: 0 };
+const CONEXOES_MAO = [
+  [0, 1], [1, 2], [2, 3], [3, 4],
+  [0, 5], [5, 6], [6, 7], [7, 8],
+  [0, 9], [9, 10], [10, 11], [11, 12],
+  [0, 13], [13, 14], [14, 15], [15, 16],
+  [0, 17], [17, 18], [18, 19], [19, 20],
+  [5, 9], [9, 13], [13, 17], [0, 17],
+];
+
+function limitar(valor, minimo, maximo) {
+  return Math.max(minimo, Math.min(maximo, valor));
+}
+
+function norma3d(a, b = [0, 0, 0]) {
+  return Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+}
+
+function calcularVetorQuadro(pontosMao3d, larguraQuadro = 480, alturaQuadro = 640, pontosPose = null, outraMao3d = null) {
+  if (!Array.isArray(pontosMao3d) || pontosMao3d.length !== 21) return null;
+
+  const maiorLado = Math.max(larguraQuadro || 480, alturaQuadro || 640, 1);
+  const escalaX = (larguraQuadro || 480) / maiorLado;
+  const escalaY = (alturaQuadro || 640) / maiorLado;
+
+  const mao = [];
+  for (let i = 0; i < 21; i += 1) {
+    const p = pontosMao3d[i];
+    if (!Array.isArray(p) || p.length < 3) return null;
+    const x = Number(p[0]) * escalaX;
+    const y = Number(p[1]) * escalaY;
+    const z = 0;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    mao.push([x, y, z]);
   }
-  const caracteristicas = quadros.flat();
-  if (caracteristicas.length !== quantidade) return { prediction: '', confidence: 0 };
-  let melhorIndice = -1;
-  let melhorPontuacao = -Infinity;
-  let segundaPontuacao = -Infinity;
-  for (let classe = 0; classe < modelo.rotulos.length; classe += 1) {
-    const coeficientes = modelo.coeficientes[classe];
-    let pontuacao = modelo.interceptos[classe];
-    for (let i = 0; i < quantidade; i += 1) {
-      const escalado = (caracteristicas[i] - modelo.media[i]) / modelo.escala[i];
-      pontuacao += coeficientes[i] * escalado;
-    }
-    if (pontuacao > melhorPontuacao) {
-      segundaPontuacao = melhorPontuacao;
-      melhorPontuacao = pontuacao;
-      melhorIndice = classe;
-    } else if (pontuacao > segundaPontuacao) {
-      segundaPontuacao = pontuacao;
+
+  const pulso = mao[0];
+  const pontosRef = [
+    [mao[0][0], mao[0][1]],
+    [mao[8][0], mao[8][1]],
+    [mao[20][0], mao[20][1]],
+    [mao[9][0], mao[9][1]],
+  ];
+  const relativos = mao.map((p) => [p[0] - pulso[0], p[1] - pulso[1], p[2] - pulso[2]]);
+  const tamanhoPalma = (
+    norma3d(relativos[5]) +
+    norma3d(relativos[9]) +
+    norma3d(relativos[13]) +
+    norma3d(relativos[17])
+  ) / 4.0;
+  const escalaMao = tamanhoPalma / 0.45;
+  if (escalaMao < 0.02) return null;
+
+  const h = relativos.map((p) => [p[0] / escalaMao, p[1] / escalaMao, p[2] / escalaMao]);
+  const detPalma = h[5][0] * h[17][1] - h[5][1] * h[17][0];
+  if (detPalma < 0) {
+    for (let i = 0; i < 21; i += 1) {
+      h[i][0] *= -1;
     }
   }
-  const margem = Math.max(0, melhorPontuacao - segundaPontuacao);
-  const escalaMargem = Math.abs(melhorPontuacao) + Math.abs(segundaPontuacao) + 1e-6;
+
+  const valores = [];
+  for (let i = 0; i < 21; i += 1) {
+    valores.push(h[i][0], h[i][1], h[i][2]);
+  }
+
+  const pontas = [4, 8, 12, 16, 20];
+  const bases = [2, 5, 9, 13, 17];
+  const cadeias = [
+    [1, 2, 3, 4],
+    [5, 6, 7, 8],
+    [9, 10, 11, 12],
+    [13, 14, 15, 16],
+    [17, 18, 19, 20],
+  ];
+
+  for (const p of pontas) {
+    valores.push(norma3d(h[p]));
+  }
+  for (let i = 0; i < pontas.length; i += 1) {
+    valores.push(norma3d(h[pontas[i]], h[bases[i]]));
+  }
+  for (const [a, b, c, d] of cadeias) {
+    const v1 = [h[b][0] - h[a][0], h[b][1] - h[a][1], h[b][2] - h[a][2]];
+    const v2 = [h[d][0] - h[c][0], h[d][1] - h[c][1], h[d][2] - h[c][2]];
+    const n = norma3d(v1) * norma3d(v2) + 1e-6;
+    valores.push((v1[0] * v2[0] + v1[1] * v2[1] + v1[2] * v2[2]) / n);
+  }
+  for (const p of [8, 12, 16, 20]) {
+    valores.push(norma3d(h[4], h[p]));
+  }
+  valores.push(norma3d(h[8], h[12]));
+  valores.push(norma3d(h[12], h[16]));
+  valores.push(norma3d(h[16], h[20]));
+  for (const b of [5, 9, 13]) {
+    valores.push(norma3d(h[4], h[b]));
+  }
+
+  if (Array.isArray(pontosPose) && pontosPose.length >= 9) {
+    const narizX = Number(pontosPose[0][0]) * escalaX;
+    const narizY = Number(pontosPose[0][1]) * escalaY;
+    const ombroEsqX = Number(pontosPose[7][0]) * escalaX;
+    const ombroEsqY = Number(pontosPose[7][1]) * escalaY;
+    const ombroDirX = Number(pontosPose[8][0]) * escalaX;
+    const ombroDirY = Number(pontosPose[8][1]) * escalaY;
+    const largOmbros = Math.max(Math.hypot(ombroEsqX - ombroDirX, ombroEsqY - ombroDirY), 0.12);
+
+    valores.push(
+      limitar((pulso[1] - narizY) / largOmbros, -2.0, 2.5),
+      limitar((mao[8][1] - narizY) / largOmbros, -2.0, 2.5),
+      limitar(Math.abs(pulso[0] - narizX) / largOmbros, 0.0, 2.5),
+      1.0
+    );
+  } else {
+    valores.push(
+      limitar((Number(pontosMao3d[0][1]) - 0.30) * 2.0, -2.0, 2.5),
+      limitar((Number(pontosMao3d[8][1]) - 0.30) * 2.0, -2.0, 2.5),
+      limitar(Math.abs(Number(pontosMao3d[0][0]) - 0.50) * 2.5, 0.0, 2.5),
+      0.0
+    );
+  }
+
+  let temOutraMao = 0.0;
+  let distPulsos = 4.0;
+  let distPontasInd = 4.0;
+  let distPontasMed = 4.0;
+  let difAlturaPulsos = 0.0;
+  let cosPalmas = 0.0;
+
+  if (Array.isArray(outraMao3d) && outraMao3d.length === 21) {
+    const outra = [];
+    let outraValida = true;
+    for (let i = 0; i < 21; i += 1) {
+      const p = outraMao3d[i];
+      if (!Array.isArray(p) || p.length < 2) {
+        outraValida = false;
+        break;
+      }
+      const ox = Number(p[0]) * escalaX;
+      const oy = Number(p[1]) * escalaY;
+      if (!Number.isFinite(ox) || !Number.isFinite(oy)) {
+        outraValida = false;
+        break;
+      }
+      outra.push([ox, oy]);
+    }
+    if (outraValida) {
+      temOutraMao = 1.0;
+      distPulsos = limitar(Math.hypot(mao[0][0] - outra[0][0], mao[0][1] - outra[0][1]) / escalaMao, 0.0, 4.0);
+      distPontasInd = limitar(Math.hypot(mao[8][0] - outra[8][0], mao[8][1] - outra[8][1]) / escalaMao, 0.0, 4.0);
+      distPontasMed = limitar(Math.hypot(mao[12][0] - outra[12][0], mao[12][1] - outra[12][1]) / escalaMao, 0.0, 4.0);
+      difAlturaPulsos = limitar((outra[0][1] - mao[0][1]) / escalaMao, -3.0, 3.0);
+      const dirAX = mao[9][0] - mao[0][0];
+      const dirAY = mao[9][1] - mao[0][1];
+      const dirBX = outra[9][0] - outra[0][0];
+      const dirBY = outra[9][1] - outra[0][1];
+      const normaAB = Math.hypot(dirAX, dirAY) * Math.hypot(dirBX, dirBY) + 1e-6;
+      cosPalmas = limitar((dirAX * dirBX + dirAY * dirBY) / normaAB, -1.0, 1.0);
+    }
+  }
+
+  valores.push(temOutraMao, distPulsos, distPontasInd, distPontasMed, difAlturaPulsos, cosPalmas);
+
   return {
-    prediction: modelo.rotulos[melhorIndice] || '',
-    // Relative margin for display only; this is not a calibrated probability.
-    confidence: margem / escalaMargem,
+    vetor: valores,
+    pontosRef,
+    centro: [Number(pontosMao3d[0][0]), Number(pontosMao3d[0][1])],
+    escalaMao,
+    instante: Date.now(),
   };
 }
 
-function medirMovimentoMao(atual, anterior) {
-  if (!Array.isArray(atual) || !Array.isArray(anterior) || atual.length !== 21 || anterior.length !== 21) return 0;
-  let total = 0;
-  for (let i = 0; i < atual.length; i += 1) {
-    total += Math.hypot(atual[i][0] - anterior[i][0], atual[i][1] - anterior[i][1]);
-  }
-  return total / atual.length;
-}
+function montarVetorTemporal(historico) {
+  const atual = historico[historico.length - 1];
+  const primeiro = historico[0];
+  const escala = Math.max(atual.escalaMao, 0.05);
 
-// Conexoes dos 21 pontos da mao (MediaPipe HandLandmarker)
-const CONEXOES_MAO = [
-  [0,1],[1,2],[2,3],[3,4],
-  [0,5],[5,6],[6,7],[7,8],
-  [0,9],[9,10],[10,11],[11,12],
-  [0,13],[13,14],[14,15],[15,16],
-  [0,17],[17,18],[18,19],[19,20],
-  [5,9],[9,13],[13,17]
-];
+  let maxAbsDx = 0;
+  let maxAmpX = 0;
+  let maxAmpY = 0;
+  let maxEnergiaX = 0;
+  let maxEnergiaY = 0;
 
-// Conexoes dos pontos da pose (cabeca + bracos)
-// Indices na lista pontos_pose: 0-6 = cabeca, 7-12 = bracos
-// 7=ombro_esq, 8=ombro_dir, 9=cotovelo_esq, 10=cotovelo_dir, 11=pulso_esq, 12=pulso_dir
-const CONEXOES_POSE = [
-  [7,8],
-  [7,9],[9,11],
-  [8,10],[10,12],
-  // Face: nose, eyes, ears and mouth corners (selected Pose landmarks).
-  [1,0],[0,2],
-  [1,3],[3,5],[5,1],
-  [2,4],[4,6],[6,2],
-  [0,7],[0,8]
-];
+  for (let r = 0; r < 4; r += 1) {
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    let energiaRX = 0;
+    let energiaRY = 0;
 
-function OverlayTracking({ pontosPose, pontosMao, pontosMaos, espelhado }) {
-  const largura = Dimensions.get('window').width - 32;
-  const altura = 300;
-
-  function converterPonto(ponto) {
-    let x = ponto[0] * largura;
-    let y = ponto[1] * altura;
-    if (espelhado) {
-      x = largura - x;
+    for (let i = 0; i < historico.length; i += 1) {
+      const px = historico[i].pontosRef[r][0];
+      const py = historico[i].pontosRef[r][1];
+      if (px < minX) minX = px;
+      if (px > maxX) maxX = px;
+      if (py < minY) minY = py;
+      if (py > maxY) maxY = py;
+      if (i > 0) {
+        energiaRX += Math.abs(px - historico[i - 1].pontosRef[r][0]) / escala;
+        energiaRY += Math.abs(py - historico[i - 1].pontosRef[r][1]) / escala;
+      }
     }
-    return { x, y };
+
+    const absDxR = Math.abs(atual.pontosRef[r][0] - primeiro.pontosRef[r][0]) / escala;
+    const ampXR = (maxX - minX) / escala;
+    const ampYR = (maxY - minY) / escala;
+
+    if (absDxR > maxAbsDx) maxAbsDx = absDxR;
+    if (ampXR > maxAmpX) maxAmpX = ampXR;
+    if (ampYR > maxAmpY) maxAmpY = ampYR;
+    if (energiaRX > maxEnergiaX) maxEnergiaX = energiaRX;
+    if (energiaRY > maxEnergiaY) maxEnergiaY = energiaRY;
   }
 
-  const elementos = [];
+  const dyPulso = (atual.pontosRef[0][1] - primeiro.pontosRef[0][1]) / escala;
+  const dyBase = (atual.pontosRef[3][1] - primeiro.pontosRef[3][1]) / escala;
+  const dyBruto = Math.abs(dyPulso) >= Math.abs(dyBase) ? dyPulso : dyBase;
 
-  const maosVisuais = pontosMaos && pontosMaos.length
-    ? pontosMaos
-    : (pontosMao && pontosMao.length === 21 ? [pontosMao] : []);
+  const absDx = limitar(maxAbsDx, 0.0, 3.0);
+  const dy = limitar(dyBruto, -3.0, 3.0);
+  const ampX = limitar(maxAmpX, 0.0, 4.0);
+  const ampY = limitar(maxAmpY, 0.0, 4.0);
+  const energiaX = Math.min(maxEnergiaX, 4.0);
+  const energiaY = Math.min(maxEnergiaY, 4.0);
+  const energiaTotal = Math.min(Math.hypot(energiaX, energiaY), 5.0);
 
-  maosVisuais.forEach((mao, indiceMao) => {
-    if (!mao || mao.length !== 21) return;
-    CONEXOES_MAO.forEach((conexao, i) => {
-      const p1 = converterPonto(mao[conexao[0]]);
-      const p2 = converterPonto(mao[conexao[1]]);
-      elementos.push(
-        <Line key={`lm${indiceMao}-${i}`} x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y}
-          stroke="#00FF00" strokeWidth={2} />
-      );
-    });
-
-    mao.forEach((ponto, i) => {
-      const p = converterPonto(ponto);
-      elementos.push(
-        <Circle key={`cm${indiceMao}-${i}`} cx={p.x} cy={p.y} r={4}
-          fill="#FF3333" stroke="#00FF00" strokeWidth={1} />
-      );
-    });
-  });
-
-  if (pontosPose && pontosPose.length === 13) {
-    CONEXOES_POSE.forEach((conexao, i) => {
-      const p1 = converterPonto(pontosPose[conexao[0]]);
-      const p2 = converterPonto(pontosPose[conexao[1]]);
-      elementos.push(
-        <Line key={`lp${i}`} x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y}
-          stroke="#00FF00" strokeWidth={2} opacity={0.7} />
-      );
-    });
-
-    pontosPose.forEach((ponto, i) => {
-      const p = converterPonto(ponto);
-      elementos.push(
-        <Circle key={`cp${i}`} cx={p.x} cy={p.y} r={3}
-          fill="#FFCC00" stroke="#00FF00" strokeWidth={1} />
-      );
-    });
+  const vetorBase = atual.vetor.slice();
+  if (vetorBase.length >= 98 && vetorBase[92] < 0.5 && historico.length >= 2) {
+    const inicioBusca = Math.max(0, historico.length - 3);
+    for (let i = historico.length - 2; i >= inicioBusca; i -= 1) {
+      if (historico[i].vetor.length >= 98 && historico[i].vetor[92] > 0.5) {
+        for (let k = 92; k < 98; k += 1) {
+          vetorBase[k] = historico[i].vetor[k];
+        }
+        break;
+      }
+    }
   }
 
-  if (elementos.length === 0) return null;
+  const deltaDedos = [];
+  for (let i = 0; i < 5; i += 1) {
+    deltaDedos.push(atual.vetor[63 + i] - primeiro.vetor[63 + i]);
+  }
 
-  return (
-    <View style={estilosOverlay.container} pointerEvents="none">
-      <Svg width={largura} height={altura}>
-        {elementos}
-      </Svg>
-    </View>
-  );
+  return vetorBase.concat([absDx, dy, ampX, ampY, energiaX, energiaY, energiaTotal], deltaDedos);
 }
 
 function preverModeloLocal(modelo, caracteristicas) {
   if (!modelo || caracteristicas.length !== modelo.quantidade_caracteristicas) {
-    return { prediction: '', confidence: 0 };
+    return { previsao: '', confianca: 0 };
   }
 
   const probabilidades = new Array(modelo.rotulos.length).fill(0);
@@ -188,10 +293,130 @@ function preverModeloLocal(modelo, caracteristicas) {
     if (probabilidades[i] > probabilidades[melhorIndice]) melhorIndice = i;
   }
   return {
-    prediction: modelo.rotulos[melhorIndice] || '',
-    confidence: probabilidades[melhorIndice] || 0
+    previsao: modelo.rotulos[melhorIndice] || '',
+    confianca: probabilidades[melhorIndice] || 0,
   };
 }
+
+function escolherRotuloVotacao(votacoes) {
+  const pesosBase = [0.60, 0.85, 1.30];
+  const pesos = pesosBase.slice(pesosBase.length - votacoes.length);
+  const infoPorRotulo = new Map();
+
+  for (let i = 0; i < votacoes.length; i += 1) {
+    const voto = votacoes[i];
+    if (!voto.previsao) continue;
+    const atual = infoPorRotulo.get(voto.previsao) || { pontuacao: 0, somaConf: 0, votos: 0 };
+    atual.pontuacao += voto.confianca * pesos[i];
+    atual.somaConf += voto.confianca;
+    atual.votos += 1;
+    infoPorRotulo.set(voto.previsao, atual);
+  }
+
+  let melhorRotulo = '';
+  let melhorInfo = null;
+  for (const [rotulo, info] of infoPorRotulo.entries()) {
+    if (!melhorInfo || info.pontuacao > melhorInfo.pontuacao) {
+      melhorRotulo = rotulo;
+      melhorInfo = info;
+    }
+  }
+
+  if (!melhorInfo) return { predicao: '', mediaConf: 0 };
+  const mediaConf = melhorInfo.somaConf / melhorInfo.votos;
+  const aceito = (melhorInfo.votos >= 2 && mediaConf >= 0.38) || mediaConf >= 0.50;
+  return { predicao: aceito ? melhorRotulo : '', mediaConf };
+}
+
+const RastreamentoMao = React.memo(function RastreamentoMao({
+  pontosMao,
+  pontosMaos,
+  espelhado,
+  dimensoesVista,
+  tamanhoQuadro,
+}) {
+  const larguraVista = dimensoesVista.largura;
+  const alturaVista = dimensoesVista.altura;
+  if (larguraVista <= 0 || alturaVista <= 0) return null;
+
+  const larguraQuadro = tamanhoQuadro.largura;
+  const alturaQuadro = tamanhoQuadro.altura;
+
+  function converterPonto(ponto) {
+    const nx = espelhado ? 1 - ponto[0] : ponto[0];
+    const ny = ponto[1];
+
+    if (larguraQuadro > 0 && alturaQuadro > 0) {
+      const escala = Math.max(larguraVista / larguraQuadro, alturaVista / alturaQuadro);
+      const larguraRenderizada = larguraQuadro * escala;
+      const alturaRenderizada = alturaQuadro * escala;
+      const corteX = (larguraRenderizada - larguraVista) / 2;
+      const corteY = (alturaRenderizada - alturaVista) / 2;
+      return {
+        x: nx * larguraRenderizada - corteX,
+        y: ny * alturaRenderizada - corteY,
+      };
+    }
+
+    return {
+      x: nx * larguraVista,
+      y: ny * alturaVista,
+    };
+  }
+
+  const maosVisuais = pontosMaos && pontosMaos.length > 0
+    ? pontosMaos
+    : (pontosMao && pontosMao.length === 21 ? [pontosMao] : []);
+
+  if (maosVisuais.length === 0) return null;
+
+  const elementos = [];
+  maosVisuais.forEach((mao, indiceMao) => {
+    if (!mao || mao.length !== 21) return;
+
+    CONEXOES_MAO.forEach((conexao, i) => {
+      const p1 = converterPonto(mao[conexao[0]]);
+      const p2 = converterPonto(mao[conexao[1]]);
+      elementos.push(
+        <Line
+          key={`linha-${indiceMao}-${i}`}
+          x1={p1.x}
+          y1={p1.y}
+          x2={p2.x}
+          y2={p2.y}
+          stroke="#16A34A"
+          strokeWidth={3}
+          strokeLinecap="round"
+        />
+      );
+    });
+
+    mao.forEach((ponto, i) => {
+      const p = converterPonto(ponto);
+      elementos.push(
+        <Circle
+          key={`ponto-${indiceMao}-${i}`}
+          cx={p.x}
+          cy={p.y}
+          r={i === 0 ? 5.5 : 4.5}
+          fill="#FFFFFF"
+          stroke="#15803D"
+          strokeWidth={2}
+        />
+      );
+    });
+  });
+
+  if (elementos.length === 0) return null;
+
+  return (
+    <View style={estilosOverlay.container} pointerEvents="none">
+      <Svg width={larguraVista} height={alturaVista}>
+        {elementos}
+      </Svg>
+    </View>
+  );
+});
 
 const estilosOverlay = StyleSheet.create({
   container: {
@@ -200,56 +425,57 @@ const estilosOverlay = StyleSheet.create({
     left: 0,
     right: 0,
     bottom: 0,
-  }
+  },
 });
 
 function AplicativoPrincipal() {
   const [permissao, pedirPermissao] = useCameraPermissions();
   const [tipoCamera, setTipoCamera] = useState('front');
-  const [cameraPronta, setCameraPronta] = useState(Platform.OS !== 'android');
+  const [cameraPronta, setCameraPronta] = useState(!usarCameraNativa);
   const [tamanhoFoto, setTamanhoFoto] = useState(undefined);
-  const [statusConexao, setStatusConexao] = useState(Platform.OS === 'android'
-    ? (modeloExperimentalDisponivel ? 'Modelo experimental local · pausado' : 'Processamento local')
-    : 'Desconectado');
+  const [dimensoesVista, setDimensoesVista] = useState({ largura: 0, altura: 0 });
+  const [tamanhoQuadro, setTamanhoQuadro] = useState({ largura: 360, altura: 480 });
+  const [statusConexao, setStatusConexao] = useState(
+    usarCameraNativa ? 'Rastreamento local ativo' : 'Desconectado'
+  );
   const [latencia, setLatencia] = useState(0);
   const [latenciaServidor, setLatenciaServidor] = useState(0);
   const [letraAtual, setLetraAtual] = useState('-');
   const [confianca, setConfianca] = useState(0);
   const [textoCompleto, setTextoCompleto] = useState('');
   const [capturando, setCapturando] = useState(false);
-  const [ipServidor, setIpServidor] = useState('10.0.0.166');
+  const [ipServidor, setIpServidor] = useState(obterIpPadraoServidor);
   const [quadrosBuffer, setQuadrosBuffer] = useState(0);
   const [gravandoGesto, setGravandoGesto] = useState(false);
   const [tempoGestoRestante, setTempoGestoRestante] = useState(0);
   const [contagemRegressiva, setContagemRegressiva] = useState(0);
-  const [pontosPose, setPontosPose] = useState([]);
   const [pontosMao, setPontosMao] = useState([]);
   const [pontosMaos, setPontosMaos] = useState([]);
 
   const cameraRef = useRef(null);
-  const cameraProntaRef = useRef(true);
   const capturandoRef = useRef(false);
   const trocandoCameraRef = useRef(false);
   const socketRef = useRef(null);
   const timerCapturaRef = useRef(null);
   const enviandoRef = useRef(false);
   const aguardandoRespostaRef = useRef(false);
+  const quadroPendenteRef = useRef(null);
   const inicioQuadroRef = useRef(0);
   const ultimaLetraRef = useRef('');
+  const ultimoSinalInseridoRef = useRef('');
   const contagemEstavelRef = useRef(0);
   const votacoesModeloRef = useRef([]);
-  const pontosMaoAnterioresRef = useRef(null);
-  const sinalExperimentalTravadoRef = useRef('');
-  const quadrosSemMovimentoRef = useRef(0);
-  const quadrosMovimentoReinicioRef = useRef(0);
   const gravandoGestoRef = useRef(false);
   const preparandoGestoRef = useRef(false);
   const melhorPredicaoGestoRef = useRef({ rotulo: '', conf: 0, contagem: 0 });
   const historicoLocalRef = useRef([]);
+  const falhasMaoLocalRef = useRef(0);
+  const quadrosSemMaoWsRef = useRef(0);
+  const estavaEmMovimentoLocalRef = useRef(false);
 
   useEffect(() => {
-    if (Platform.OS === 'android') {
-      setStatusConexao('Processamento local');
+    if (usarCameraNativa) {
+      setStatusConexao('Rastreamento local ativo');
       return () => pararCaptura();
     }
     conectarSocket();
@@ -259,6 +485,15 @@ function AplicativoPrincipal() {
     };
   }, [ipServidor]);
 
+  function atualizarDimensoesQuadro(largura, altura) {
+    if (!largura || !altura) return;
+    setTamanhoQuadro((atual) => (
+      atual.largura === largura && atual.altura === altura
+        ? atual
+        : { largura, altura }
+    ));
+  }
+
   function fecharSocket() {
     if (socketRef.current) {
       socketRef.current.close();
@@ -266,9 +501,30 @@ function AplicativoPrincipal() {
     }
   }
 
+  function limparHistoricoPredicao() {
+    historicoLocalRef.current = [];
+    votacoesModeloRef.current = [];
+    falhasMaoLocalRef.current = 0;
+    quadrosSemMaoWsRef.current = 0;
+    estavaEmMovimentoLocalRef.current = false;
+    ultimaLetraRef.current = '';
+    ultimoSinalInseridoRef.current = '';
+    contagemEstavelRef.current = 0;
+  }
+
+  function enviarQuadroSocket(base64) {
+    if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+    aguardandoRespostaRef.current = true;
+    inicioQuadroRef.current = Date.now();
+    socketRef.current.send(base64);
+    return true;
+  }
+
   function conectarSocket() {
-    if (Platform.OS === 'android') {
-      setStatusConexao('Processamento local');
+    if (usarCameraNativa) {
+      setStatusConexao('Rastreamento local ativo');
       return;
     }
     fecharSocket();
@@ -290,76 +546,104 @@ function AplicativoPrincipal() {
           : 0;
         inicioQuadroRef.current = 0;
         if (latenciaQuadro) setLatencia(latenciaQuadro);
+
+        const pendente = quadroPendenteRef.current;
+        if (pendente && socketRef.current === ws && (capturandoRef.current || gravandoGestoRef.current)) {
+          quadroPendenteRef.current = null;
+          enviarQuadroSocket(pendente);
+        }
+
         try {
           const dados = JSON.parse(evento.data);
           if (typeof dados.tempo_ms === 'number') {
-            setLatenciaServidor(dados.tempo_ms);
+            setLatenciaServidor(Math.round(dados.tempo_ms));
           }
+          atualizarDimensoesQuadro(dados.largura_quadro, dados.altura_quadro);
+
           if (dados.status === 'ok') {
-            const predicao = dados.prediction || dados.previsao || '';
-            const conf = dados.confidence || dados.confianca || 0;
+            quadrosSemMaoWsRef.current = 0;
+            const predicao = dados.previsao || dados.prediction || '';
+            const conf = dados.confianca || dados.confidence || 0;
             const tempoServidor = dados.tempo_ms || 0;
             const bufferLen = dados.quadros_buffer || 0;
 
-            setLetraAtual(predicao || '-');
-            setConfianca(Math.round(conf * 100));
-            if (!latenciaQuadro) setLatencia(tempoServidor);
+            if (!latenciaQuadro) setLatencia(Math.round(tempoServidor));
             setQuadrosBuffer(bufferLen);
+            setPontosMao(dados.pontos_mao || []);
+            setPontosMaos(dados.pontos_maos || []);
 
-            if (dados.pontos_pose) setPontosPose(dados.pontos_pose);
-            if (dados.pontos_mao) setPontosMao(dados.pontos_mao);
-            if (dados.pontos_maos) setPontosMaos(dados.pontos_maos);
-
-            if (gravandoGestoRef.current && predicao && conf > melhorPredicaoGestoRef.current.conf) {
-              melhorPredicaoGestoRef.current = { rotulo: predicao, conf: conf };
+            if (predicao && conf >= 0.38) {
+              setLetraAtual(predicao);
+              setConfianca(Math.round(conf * 100));
+            } else {
+              setLetraAtual('Analisando sinal...');
+              setConfianca(0);
             }
 
-            if (!gravandoGestoRef.current && predicao && conf >= 0.50) {
+            if (gravandoGestoRef.current && predicao && conf >= 0.40) {
+              const anterior = melhorPredicaoGestoRef.current;
+              const contagem = anterior.rotulo === predicao ? anterior.contagem + 1 : 1;
+              if (conf >= anterior.conf || contagem > anterior.contagem) {
+                melhorPredicaoGestoRef.current = { rotulo: predicao, conf, contagem };
+              }
+            }
+
+            if (!gravandoGestoRef.current && predicao && conf >= 0.48) {
               if (predicao === ultimaLetraRef.current) {
                 contagemEstavelRef.current += 1;
-                if (contagemEstavelRef.current === 2) {
-                  adicionarAoTexto(predicao);
-                }
               } else {
                 ultimaLetraRef.current = predicao;
                 contagemEstavelRef.current = 1;
               }
+              const prontoInserir = contagemEstavelRef.current >= 2 || (conf >= 0.66 && bufferLen >= 3);
+              if (prontoInserir && ultimoSinalInseridoRef.current !== predicao) {
+                adicionarAoTexto(predicao);
+                ultimoSinalInseridoRef.current = predicao;
+              }
+            } else if (!gravandoGestoRef.current && !predicao) {
+              ultimaLetraRef.current = '';
+              contagemEstavelRef.current = 0;
             }
-          } else if (
-            dados.status === 'nenhum_sinal_detectado' ||
-            dados.status === 'nenhuma_mao_detectada' ||
-            dados.status === 'nenhum_corpo_detectado'
-          ) {
-            setLetraAtual('Posicione-se');
-            setConfianca(0);
-            setPontosPose([]);
-            setPontosMao([]);
-            setPontosMaos([]);
+          } else {
+            quadrosSemMaoWsRef.current += 1;
+            if (quadrosSemMaoWsRef.current >= 3) {
+              setPontosMao([]);
+              setPontosMaos([]);
+              setQuadrosBuffer(0);
+              ultimaLetraRef.current = '';
+              ultimoSinalInseridoRef.current = '';
+              contagemEstavelRef.current = 0;
+              if (!gravandoGestoRef.current) {
+                setLetraAtual('Mostre a mao na camera');
+                setConfianca(0);
+              }
+            }
           }
-        } catch (erro) {
+        } catch {
           inicioQuadroRef.current = 0;
-          // Ignora falha de parse
         }
 
-        // Continue immediately when the previous inference returns. A fixed
-        // interval could add up to 120 ms of idle time between frames.
-        if (socketRef.current === ws) agendarProximoQuadro();
+        if (socketRef.current === ws && !enviandoRef.current && !quadroPendenteRef.current) {
+          agendarProximoQuadro();
+        }
       };
 
       ws.onerror = () => {
         aguardandoRespostaRef.current = false;
+        quadroPendenteRef.current = null;
         inicioQuadroRef.current = 0;
         setStatusConexao('Erro de conexao');
       };
 
       ws.onclose = () => {
         aguardandoRespostaRef.current = false;
+        quadroPendenteRef.current = null;
         inicioQuadroRef.current = 0;
         setStatusConexao('Desconectado');
       };
 
       socketRef.current = ws;
-    } catch (erro) {
+    } catch {
       setStatusConexao('Falha ao abrir socket');
     }
   }
@@ -368,10 +652,8 @@ function AplicativoPrincipal() {
     if (
       !sinal ||
       sinal === '-' ||
-      sinal === 'Posicione-se' ||
-      sinal === 'Mostre a mao inteira' ||
-      sinal === 'Estabilizando previsão...' ||
-      sinal.startsWith('Preparando janela') ||
+      sinal === 'Mostre a mao na camera' ||
+      sinal === 'Analisando sinal...' ||
       sinal.startsWith('Prepare-se') ||
       sinal.startsWith('Gravando') ||
       sinal === 'Sinal nao reconhecido'
@@ -385,7 +667,7 @@ function AplicativoPrincipal() {
         return sinal;
       }
       if (sinal.length > 1 || anterior.endsWith(' ')) {
-        return anterior.endsWith(' ') ? anterior + sinal : anterior + ' ' + sinal;
+        return anterior.endsWith(' ') ? anterior + sinal : `${anterior} ${sinal}`;
       }
       return anterior + sinal;
     });
@@ -414,183 +696,207 @@ function AplicativoPrincipal() {
 
   function receberQuadroLocal(evento) {
     const dados = evento?.nativeEvent || {};
-    const vetor = dados.vetor || [];
     const inicioClassificacao = Date.now();
-    const tempoRastreamento = typeof dados.tempo_ms === 'number' ? dados.tempo_ms : 0;
+    const tempoRastreamento = typeof dados.tempo_ms === 'number' ? Math.round(dados.tempo_ms) : 0;
+
+    atualizarDimensoesQuadro(dados.largura_quadro, dados.altura_quadro);
+    const temPontos = (Array.isArray(dados.pontos_maos) && dados.pontos_maos.length > 0)
+      || (Array.isArray(dados.pontos_mao) && dados.pontos_mao.length === 21);
+    if (temPontos) {
+      setPontosMao(dados.pontos_mao || []);
+      setPontosMaos(dados.pontos_maos || []);
+    } else if (!capturandoRef.current && !gravandoGestoRef.current) {
+      setPontosMao([]);
+      setPontosMaos([]);
+    }
     setLatencia(tempoRastreamento);
     setLatenciaServidor(0);
-    if (dados.pontos_pose) setPontosPose(dados.pontos_pose);
-    if (dados.pontos_mao) setPontosMao(dados.pontos_mao);
-    if (dados.pontos_maos) setPontosMaos(dados.pontos_maos);
 
-    const quadroExperimental = modeloExperimentalDisponivel
-      ? normalizarMaoParaModeloExperimental(dados.pontos_mao_3d)
-      : null;
-    if (modeloExperimentalDisponivel ? !quadroExperimental : (vetor.length !== 102 || !dados.tem_pose || !dados.tem_mao)) {
-      historicoLocalRef.current = [];
-      ultimaLetraRef.current = '';
-      contagemEstavelRef.current = 0;
-      votacoesModeloRef.current = [];
-      pontosMaoAnterioresRef.current = null;
-      sinalExperimentalTravadoRef.current = '';
-      quadrosSemMovimentoRef.current = 0;
-      quadrosMovimentoReinicioRef.current = 0;
-      setLetraAtual(modeloExperimentalDisponivel ? 'Mostre a mao inteira' : 'Mantenha mao e corpo visiveis');
+    if (!capturandoRef.current && !gravandoGestoRef.current) {
+      return;
+    }
+
+    const listaMaos3d = Array.isArray(dados.pontos_maos_3d) && dados.pontos_maos_3d.length > 0
+      ? dados.pontos_maos_3d
+      : (dados.tem_mao && Array.isArray(dados.pontos_mao_3d) ? [dados.pontos_mao_3d] : []);
+
+    const quadrosMaos = [];
+    for (let idx = 0; idx < listaMaos3d.length; idx += 1) {
+      const outraMao3d = listaMaos3d.length === 2 ? listaMaos3d[1 - idx] : null;
+      const q = calcularVetorQuadro(
+        listaMaos3d[idx],
+        dados.largura_quadro || 360,
+        dados.altura_quadro || 480,
+        dados.pontos_pose,
+        outraMao3d
+      );
+      if (q) quadrosMaos.push(q);
+    }
+
+    if (quadrosMaos.length === 0) {
+      falhasMaoLocalRef.current += 1;
+      if (falhasMaoLocalRef.current >= 3) {
+        setPontosMao([]);
+        setPontosMaos([]);
+        if (!gravandoGestoRef.current) {
+          setLetraAtual('Mostre a mao na camera');
+          setConfianca(0);
+        }
+      }
+      if (falhasMaoLocalRef.current >= 5) {
+        limparHistoricoPredicao();
+        setQuadrosBuffer(0);
+      }
+      return;
+    }
+
+    falhasMaoLocalRef.current = 0;
+    const agoraMs = Date.now();
+    const trilhas = historicoLocalRef.current.filter((t) => agoraMs - t.ultimoInstante <= 1100);
+    const limiteDist = quadrosMaos.length === 1 && trilhas.length === 1 ? 0.85 : 0.65;
+    const pares = [];
+    for (let iq = 0; iq < quadrosMaos.length; iq += 1) {
+      for (let it = 0; it < trilhas.length; it += 1) {
+        const dist = Math.hypot(
+          quadrosMaos[iq].centro[0] - trilhas[it].centro[0],
+          quadrosMaos[iq].centro[1] - trilhas[it].centro[1]
+        );
+        if (dist <= limiteDist) pares.push([dist, iq, it]);
+      }
+    }
+    pares.sort((a, b) => a[0] - b[0]);
+
+    const usadosQ = new Set();
+    const usadosT = new Set();
+    const trilhasAtivas = [];
+
+    for (const [, iq, it] of pares) {
+      if (usadosQ.has(iq) || usadosT.has(it)) continue;
+      usadosQ.add(iq);
+      usadosT.add(it);
+      const q = quadrosMaos[iq];
+      const trilha = trilhas[it];
+      while (trilha.quadros.length > 0 && q.instante - trilha.quadros[0].instante > JANELA_TEMPORAL_MS) {
+        trilha.quadros.shift();
+      }
+      if (trilha.quadros.length >= 2 && q.instante - trilha.quadros[trilha.quadros.length - 2].instante < 110) {
+        trilha.quadros[trilha.quadros.length - 1] = q;
+      } else {
+        trilha.quadros.push(q);
+        if (trilha.quadros.length > 9) trilha.quadros.shift();
+      }
+      trilha.centro = q.centro;
+      trilha.ultimoInstante = q.instante;
+      trilhasAtivas.push(trilha);
+    }
+
+    for (let iq = 0; iq < quadrosMaos.length; iq += 1) {
+      if (usadosQ.has(iq)) continue;
+      const q = quadrosMaos[iq];
+      const nova = { centro: q.centro, ultimoInstante: q.instante, quadros: [q] };
+      trilhas.push(nova);
+      trilhasAtivas.push(nova);
+    }
+
+    trilhas.sort((a, b) => b.ultimoInstante - a.ultimoInstante);
+    historicoLocalRef.current = trilhas.slice(0, 2);
+
+    const menorY = Math.min(...trilhasAtivas.map((t) => t.centro[1]));
+    const maiorY = Math.max(...trilhasAtivas.map((t) => t.centro[1]));
+    const avaliacoes = trilhasAtivas.map((trilha) => {
+      const caracteristicas = montarVetorTemporal(trilha.quadros);
+      const res = preverModeloLocal(modeloLocal, caracteristicas);
+      const emMov = caracteristicas[104] >= 0.28 || Math.max(caracteristicas[100], caracteristicas[101]) >= 0.24;
+      let prioridade = res.confianca;
+      if (trilhasAtivas.length > 1) {
+        if (maiorY - menorY > 0.14 && trilha.centro[1] <= menorY + 0.02) prioridade += 0.08;
+        if (emMov) prioridade += 0.14;
+      }
+      return {
+        previsao: res.previsao,
+        confianca: res.confianca,
+        prioridade,
+        quadros: trilha.quadros.length,
+        emMovimento: emMov,
+      };
+    });
+
+    let resultado;
+    let emMovimentoAtual = false;
+    let bufferAtual = 0;
+    if (avaliacoes.length === 2 && avaliacoes[0].previsao && avaliacoes[0].previsao === avaliacoes[1].previsao) {
+      resultado = {
+        previsao: avaliacoes[0].previsao,
+        confianca: Math.min(1.0, Math.max(avaliacoes[0].confianca, avaliacoes[1].confianca) + 0.05),
+      };
+      emMovimentoAtual = avaliacoes[0].emMovimento || avaliacoes[1].emMovimento;
+      bufferAtual = Math.max(avaliacoes[0].quadros, avaliacoes[1].quadros);
+    } else {
+      avaliacoes.sort((a, b) => b.prioridade - a.prioridade);
+      resultado = { previsao: avaliacoes[0].previsao, confianca: avaliacoes[0].confianca };
+      emMovimentoAtual = avaliacoes[0].emMovimento;
+      bufferAtual = avaliacoes[0].quadros;
+    }
+    setQuadrosBuffer(bufferAtual);
+
+    setLatencia(tempoRastreamento + (Date.now() - inicioClassificacao));
+
+    let votacoes = votacoesModeloRef.current;
+    if (emMovimentoAtual && !estavaEmMovimentoLocalRef.current) {
+      votacoes = votacoes.filter((v) => v.previsao === resultado.previsao);
+      votacoesModeloRef.current = votacoes;
+    }
+    estavaEmMovimentoLocalRef.current = emMovimentoAtual;
+
+    votacoes.push(resultado);
+    if (votacoes.length > 3) votacoes.shift();
+
+    const { predicao, mediaConf } = escolherRotuloVotacao(votacoes);
+
+    if (predicao) {
+      setLetraAtual(predicao);
+      setConfianca(Math.round(mediaConf * 100));
+    } else if (!gravandoGestoRef.current) {
+      setLetraAtual('Analisando sinal...');
       setConfianca(0);
-      setQuadrosBuffer(0);
-      setStatusConexao(dados.diagnostico || 'Aguardando mao e parte superior do corpo');
-      return;
     }
 
-    if (modeloExperimentalDisponivel) {
-      const historico = historicoLocalRef.current;
-      const pontosBrutosMao = dados.pontos_mao_3d;
-      const movimento = medirMovimentoMao(pontosBrutosMao, pontosMaoAnterioresRef.current);
-      pontosMaoAnterioresRef.current = pontosBrutosMao;
-
-      if (sinalExperimentalTravadoRef.current) {
-        if (movimento < 0.004) {
-          quadrosSemMovimentoRef.current += 1;
-          quadrosMovimentoReinicioRef.current = 0;
-        } else if (quadrosSemMovimentoRef.current >= 8 && movimento >= 0.012) {
-          quadrosMovimentoReinicioRef.current += 1;
-        } else {
-          quadrosMovimentoReinicioRef.current = 0;
-          if (movimento >= 0.004) quadrosSemMovimentoRef.current = 0;
-        }
-
-        if (quadrosMovimentoReinicioRef.current >= 2) {
-          sinalExperimentalTravadoRef.current = '';
-          quadrosSemMovimentoRef.current = 0;
-          quadrosMovimentoReinicioRef.current = 0;
-          historico.length = 0;
-          votacoesModeloRef.current = [];
-          ultimaLetraRef.current = '';
-          contagemEstavelRef.current = 0;
-        } else {
-          setLetraAtual(sinalExperimentalTravadoRef.current);
-          setStatusConexao('Sinal registrado · aguarde uma pausa e faça o próximo');
-          return;
-        }
-      }
-
-      historico.push(quadroExperimental);
-      if (historico.length > modeloTemporalPiloto.frames) historico.shift();
-      setQuadrosBuffer(historico.length);
-      setStatusConexao('Modelo experimental local · 20 sinais · pontuação não calibrada');
-      if (historico.length < modeloTemporalPiloto.frames) {
-        setLetraAtual('Preparando janela experimental');
-        setConfianca(0);
-        return;
-      }
-      const resultado = preverModeloTemporalPiloto(modeloTemporalPiloto, historico);
-      setLatencia(tempoRastreamento + Date.now() - inicioClassificacao);
-      const votacoes = votacoesModeloRef.current;
-      votacoes.push(resultado);
-      if (votacoes.length > 7) votacoes.shift();
-      const contagens = new Map();
-      for (const voto of votacoes) {
-        if (!voto.prediction) continue;
-        const anterior = contagens.get(voto.prediction) || { quantidade: 0, pontuacao: 0 };
-        anterior.quantidade += 1;
-        anterior.pontuacao += voto.confidence;
-        contagens.set(voto.prediction, anterior);
-      }
-      const [rotuloVotado, consenso] = [...contagens.entries()].sort((a, b) => b[1].quantidade - a[1].quantidade)[0] || ['', { quantidade: 0, pontuacao: 0 }];
-      const predicao = consenso.quantidade >= 5 ? rotuloVotado : '';
-      const conf = predicao ? consenso.pontuacao / consenso.quantidade : 0;
-      if (predicao) {
-        setLetraAtual(predicao);
-        setConfianca(Math.round(conf * 100));
-      } else if (!ultimaLetraRef.current) {
-        setLetraAtual('Estabilizando previsão...');
-        setConfianca(0);
-      }
-
-      if (gravandoGestoRef.current && predicao && conf >= 0.70) {
-        const anterior = melhorPredicaoGestoRef.current;
-        const contagem = anterior.rotulo === predicao ? anterior.contagem + 1 : 1;
-        melhorPredicaoGestoRef.current = {
-          rotulo: predicao,
-          conf: anterior.rotulo === predicao ? Math.max(anterior.conf, conf) : conf,
-          contagem
-        };
-      }
-      if (!gravandoGestoRef.current && predicao && conf >= 0.70) {
-        if (predicao === ultimaLetraRef.current) {
-          contagemEstavelRef.current += 1;
-        } else {
-          ultimaLetraRef.current = predicao;
-          contagemEstavelRef.current = 1;
-        }
-        if (contagemEstavelRef.current >= 3 && !sinalExperimentalTravadoRef.current) {
-          adicionarAoTexto(predicao);
-          sinalExperimentalTravadoRef.current = predicao;
-          quadrosSemMovimentoRef.current = 0;
-          quadrosMovimentoReinicioRef.current = 0;
-        }
-      } else if (!gravandoGestoRef.current) {
-        ultimaLetraRef.current = '';
-        contagemEstavelRef.current = 0;
-      }
-      return;
-    }
-
-    // The checked-in mobile artifact was trained only with generated geometric
-    // poses. It is useful for UI demos, but cannot translate real Libras.
-    if (!modeloTreinadoComDadosReais) {
-      historicoLocalRef.current = [];
-      ultimaLetraRef.current = '';
-      contagemEstavelRef.current = 0;
-      setLetraAtual('Treino real necessario');
-      setConfianca(0);
-      setQuadrosBuffer(0);
-      setStatusConexao('Rastreamento local · modelo demonstrativo');
-      return;
-    }
-
-    const historico = historicoLocalRef.current;
-    historico.push(vetor);
-    if (historico.length > 10) historico.shift();
-    const inicial = historico[0];
-    const caracteristicas = vetor.concat(vetor.map((valor, indice) => valor - inicial[indice]));
-    const resultado = preverModeloLocal(modeloLocal, caracteristicas);
-    setLatencia(tempoRastreamento + Date.now() - inicioClassificacao);
-    const predicao = resultado.prediction;
-    const conf = resultado.confidence;
-    setQuadrosBuffer(historico.length);
-    setLetraAtual(predicao || '-');
-    setConfianca(Math.round(conf * 100));
-
-    if (gravandoGestoRef.current && predicao && conf >= 0.70) {
+    if (gravandoGestoRef.current && predicao && mediaConf >= 0.40) {
       const anterior = melhorPredicaoGestoRef.current;
       const contagem = anterior.rotulo === predicao ? anterior.contagem + 1 : 1;
-      melhorPredicaoGestoRef.current = {
-        rotulo: predicao,
-        conf: anterior.rotulo === predicao ? Math.max(anterior.conf, conf) : conf,
-        contagem
-      };
+      if (mediaConf >= anterior.conf || contagem > anterior.contagem) {
+        melhorPredicaoGestoRef.current = {
+          rotulo: predicao,
+          conf: mediaConf,
+          contagem,
+        };
+      }
     }
-    if (!gravandoGestoRef.current && predicao && conf >= 0.70) {
+
+    if (!gravandoGestoRef.current && predicao && mediaConf >= 0.48) {
       if (predicao === ultimaLetraRef.current) {
         contagemEstavelRef.current += 1;
-        if (contagemEstavelRef.current === 6) adicionarAoTexto(predicao);
       } else {
         ultimaLetraRef.current = predicao;
         contagemEstavelRef.current = 1;
       }
-    } else if (!gravandoGestoRef.current) {
+      const prontoInserir = contagemEstavelRef.current >= 2 || (mediaConf >= 0.66 && bufferAtual >= 3);
+      if (prontoInserir && ultimoSinalInseridoRef.current !== predicao) {
+        adicionarAoTexto(predicao);
+        ultimoSinalInseridoRef.current = predicao;
+      }
+    } else if (!gravandoGestoRef.current && !predicao) {
       ultimaLetraRef.current = '';
       contagemEstavelRef.current = 0;
     }
   }
 
   async function capturarEEnviar() {
-    if (Platform.OS === 'android') return;
+    if (usarCameraNativa) return;
     if (
       (!capturandoRef.current && !gravandoGestoRef.current) ||
       enviandoRef.current ||
-      aguardandoRespostaRef.current ||
+      quadroPendenteRef.current !== null ||
       !cameraRef.current ||
       trocandoCameraRef.current
     ) {
@@ -602,35 +908,34 @@ function AplicativoPrincipal() {
     }
 
     enviandoRef.current = true;
-    inicioQuadroRef.current = Date.now();
     let falhaNaCaptura = false;
     try {
       const foto = await cameraRef.current.takePictureAsync({
-        quality: 0.25,
-        shutterSound: false
+        quality: 0.30,
+        base64: true,
+        exif: false,
+        shutterSound: false,
       });
 
-      if (foto && foto.uri && socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
-        const bytesImagem = await new File(foto.uri).arrayBuffer();
-        // Backpressure: do not enqueue stale camera frames on the socket.
-        // Wait for this frame's inference response before sending another.
-        aguardandoRespostaRef.current = true;
-        socketRef.current.send(bytesImagem);
+      if (foto?.uri) {
+        try {
+          new File(foto.uri).delete();
+        } catch {}
       }
 
-      if (foto && foto.uri) {
-        // Keep cache cleanup out of the critical path for the next frame.
-        FileSystem.deleteAsync(foto.uri, { idempotent: true }).catch(() => {});
+      if (foto?.base64 && (capturandoRef.current || gravandoGestoRef.current)) {
+        if (!aguardandoRespostaRef.current) {
+          enviarQuadroSocket(foto.base64);
+        } else {
+          quadroPendenteRef.current = foto.base64;
+        }
       }
-    } catch (erro) {
+    } catch {
       falhaNaCaptura = true;
-      aguardandoRespostaRef.current = false;
-      inicioQuadroRef.current = 0;
-      // Ignora erro no quadro
     } finally {
       enviandoRef.current = false;
-      if (!aguardandoRespostaRef.current) {
-        agendarProximoQuadro(falhaNaCaptura ? 100 : 0);
+      if ((capturandoRef.current || gravandoGestoRef.current) && quadroPendenteRef.current === null) {
+        agendarProximoQuadro(falhaNaCaptura ? 80 : 0);
       }
     }
   }
@@ -640,6 +945,10 @@ function AplicativoPrincipal() {
       capturarEEnviar();
     } else {
       pararCaptura();
+      if (!usarCameraNativa) {
+        setPontosMao([]);
+        setPontosMaos([]);
+      }
     }
     return () => pararCaptura();
   }, [capturando]);
@@ -651,26 +960,19 @@ function AplicativoPrincipal() {
     }
     enviandoRef.current = false;
     aguardandoRespostaRef.current = false;
+    quadroPendenteRef.current = null;
     inicioQuadroRef.current = 0;
   }
 
   function alternarCaptura() {
     const novo = !capturando;
     capturandoRef.current = novo;
+    limparHistoricoPredicao();
     if (!novo) {
-      historicoLocalRef.current = [];
-      votacoesModeloRef.current = [];
-      pontosMaoAnterioresRef.current = null;
-      sinalExperimentalTravadoRef.current = '';
-      quadrosSemMovimentoRef.current = 0;
-      quadrosMovimentoReinicioRef.current = 0;
-      ultimaLetraRef.current = '';
-      contagemEstavelRef.current = 0;
+      setQuadrosBuffer(0);
     }
-    if (Platform.OS === 'android') {
-      setStatusConexao(novo
-        ? ((modeloTreinadoComDadosReais || modeloExperimentalDisponivel) ? 'Rastreamento e traducao locais' : 'Rastreamento local · modelo demonstrativo')
-        : (modeloExperimentalDisponivel ? 'Modelo experimental local · pausado' : 'Processamento local'));
+    if (usarCameraNativa) {
+      setStatusConexao(novo ? 'Traducao local ativa' : 'Rastreamento local ativo');
     }
     setCapturando(novo);
   }
@@ -680,14 +982,7 @@ function AplicativoPrincipal() {
       return;
     }
 
-    if (Platform.OS === 'android' && !modeloTreinadoComDadosReais && !modeloExperimentalDisponivel) {
-      setLetraAtual('Treino real necessario');
-      setConfianca(0);
-      setStatusConexao('Rastreamento local · modelo demonstrativo');
-      return;
-    }
-
-    if (Platform.OS !== 'android' && (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN)) {
+    if (!usarCameraNativa && (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN)) {
       setStatusConexao('Desconectado! Verifique o IP');
       conectarSocket();
       return;
@@ -713,14 +1008,10 @@ function AplicativoPrincipal() {
   }
 
   function executarGravacaoGesto() {
-    historicoLocalRef.current = [];
-    votacoesModeloRef.current = [];
-    pontosMaoAnterioresRef.current = null;
-    sinalExperimentalTravadoRef.current = '';
-    quadrosSemMovimentoRef.current = 0;
-    quadrosMovimentoReinicioRef.current = 0;
+    limparHistoricoPredicao();
+    quadroPendenteRef.current = null;
     if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
-      socketRef.current.send(JSON.stringify({ tipo: "limpar_buffer" }));
+      socketRef.current.send(JSON.stringify({ tipo: 'limpar_buffer' }));
     }
 
     gravandoGestoRef.current = true;
@@ -736,7 +1027,7 @@ function AplicativoPrincipal() {
 
     const timerProgresso = setInterval(() => {
       const decorrido = Date.now() - tempoInicio;
-      const restante = Math.max(0, ((duracaoTotal - decorrido) / 1000)).toFixed(1);
+      const restante = Math.max(0, (duracaoTotal - decorrido) / 1000).toFixed(1);
       setTempoGestoRestante(parseFloat(restante));
 
       if (decorrido >= duracaoTotal) {
@@ -746,9 +1037,8 @@ function AplicativoPrincipal() {
         setTempoGestoRestante(0);
 
         const melhor = melhorPredicaoGestoRef.current;
-        const gestoEstavel = Platform.OS !== 'android' || melhor.contagem >= 6;
-        const confiancaMinima = Platform.OS === 'android' ? 0.70 : 0.30;
-        if (melhor.rotulo && melhor.conf >= confiancaMinima && gestoEstavel) {
+        const gestoEstavel = !usarCameraNativa || melhor.contagem >= 2;
+        if (melhor.rotulo && melhor.conf >= 0.42 && gestoEstavel) {
           adicionarAoTexto(melhor.rotulo);
           setLetraAtual(melhor.rotulo);
           setConfianca(Math.round(melhor.conf * 100));
@@ -766,6 +1056,10 @@ function AplicativoPrincipal() {
     }
 
     trocandoCameraRef.current = true;
+    quadroPendenteRef.current = null;
+    setPontosMao([]);
+    setPontosMaos([]);
+    limparHistoricoPredicao();
     setTipoCamera((atual) => (atual === 'front' ? 'back' : 'front'));
 
     setTimeout(() => {
@@ -778,18 +1072,11 @@ function AplicativoPrincipal() {
     setTextoCompleto('');
     setLetraAtual('-');
     setConfianca(0);
-    ultimaLetraRef.current = '';
-    contagemEstavelRef.current = 0;
-    historicoLocalRef.current = [];
-    votacoesModeloRef.current = [];
-    pontosMaoAnterioresRef.current = null;
-    sinalExperimentalTravadoRef.current = '';
-    quadrosSemMovimentoRef.current = 0;
-    quadrosMovimentoReinicioRef.current = 0;
+    limparHistoricoPredicao();
   }
 
   function adicionarEspaco() {
-    setTextoCompleto((anterior) => anterior + ' ');
+    setTextoCompleto((anterior) => `${anterior} `);
   }
 
   if (!permissao) {
@@ -821,7 +1108,7 @@ function AplicativoPrincipal() {
       <ScrollView contentContainerStyle={estilos.conteudoScroll}>
         <View style={estilos.cabecalho}>
           <Text style={estilos.titulo}>Tradutor de Libras</Text>
-          {Platform.OS !== 'android' && (
+          {!usarCameraNativa && (
             <View style={estilos.linhaConfiguracao}>
               <Text style={estilos.rotulo}>IP do Servidor:</Text>
               <TextInput
@@ -838,28 +1125,35 @@ function AplicativoPrincipal() {
           )}
           <View style={estilos.linhaStatus}>
             <Text style={estilos.rotuloStatus}>Status: {statusConexao}</Text>
-            <Text style={estilos.rotuloStatus}>
-              {Platform.OS === 'android'
-                ? `Quadros locais: ${quadrosBuffer}/${modeloExperimentalDisponivel ? modeloTemporalPiloto.frames : 10}`
-                : `Buffer: ${quadrosBuffer}/10 quadros`}
-            </Text>
+            <Text style={estilos.rotuloStatus}>Buffer: {quadrosBuffer}/9 quadros</Text>
           </View>
           <View style={estilos.linhaStatus}>
-            <Text style={estilos.rotuloStatus}>{Platform.OS === 'android' ? `Inferencia local: ${latencia} ms` : `Total: ${latencia} ms`}</Text>
-            {Platform.OS !== 'android' && <Text style={estilos.rotuloStatus}>Servidor: {latenciaServidor} ms</Text>}
+            <Text style={estilos.rotuloStatus}>
+              {usarCameraNativa ? `Inferencia local: ${latencia} ms` : `Latencia: ${latencia} ms`}
+            </Text>
+            {!usarCameraNativa && <Text style={estilos.rotuloStatus}>Servidor: {latenciaServidor} ms</Text>}
           </View>
         </View>
 
-        <View style={estilos.areaCamera}>
-          {Platform.OS === 'android' ? (
+        <View
+          style={estilos.areaCamera}
+          onLayout={(evento) => {
+            const { width, height } = evento.nativeEvent.layout;
+            setDimensoesVista((atual) => (
+              atual.largura === width && atual.altura === height
+                ? atual
+                : { largura: width, altura: height }
+            ));
+          }}
+        >
+          {usarCameraNativa ? (
             <LibrasNativeCamera
               key={tipoCamera}
               style={estilos.camera}
               active={permissao.granted}
-              tracking={capturando || gravandoGesto}
+              tracking={permissao.granted}
               facing={tipoCamera}
               onCameraReady={() => {
-                cameraProntaRef.current = true;
                 setCameraPronta(true);
                 trocandoCameraRef.current = false;
               }}
@@ -874,24 +1168,35 @@ function AplicativoPrincipal() {
               ref={cameraRef}
               style={estilos.camera}
               facing={tipoCamera}
+              ratio="4:3"
               animateShutter={false}
               flash="off"
               mute={true}
               onCameraReady={() => {
-                cameraProntaRef.current = true;
                 setCameraPronta(true);
                 cameraRef.current?.getAvailablePictureSizesAsync()
                   .then((tamanhos) => {
                     const resolucoes = tamanhos
                       .map((tamanho) => {
                         const [largura, altura] = tamanho.split('x').map(Number);
-                        return { tamanho, largura, altura, area: largura * altura };
+                        const maior = Math.max(largura, altura);
+                        const menor = Math.min(largura, altura);
+                        return {
+                          tamanho,
+                          largura,
+                          altura,
+                          maior,
+                          menor,
+                          area: largura * altura,
+                          quatroPorTres: Math.abs(maior / menor - 4 / 3) < 0.06,
+                        };
                       })
                       .filter((item) => item.largura && item.altura)
                       .sort((a, b) => a.area - b.area);
-                    const recomendada = resolucoes.find((item) =>
-                      item.largura >= 640 && item.altura >= 480
-                    ) || resolucoes.find((item) => Math.max(item.largura, item.altura) >= 640)
+                    const recomendada = resolucoes.find((item) => item.quatroPorTres && item.maior >= 320 && item.maior <= 480)
+                      || resolucoes.find((item) => item.quatroPorTres && item.maior >= 320 && item.maior <= 640)
+                      || resolucoes.find((item) => item.maior >= 320 && item.maior <= 480)
+                      || resolucoes.find((item) => item.maior >= 320 && item.maior <= 640)
                       || resolucoes[0];
                     if (recomendada) setTamanhoFoto(recomendada.tamanho);
                   })
@@ -899,17 +1204,17 @@ function AplicativoPrincipal() {
               }}
               pictureSize={tamanhoFoto}
               onMountError={() => {
-                cameraProntaRef.current = false;
                 setCameraPronta(false);
                 trocandoCameraRef.current = false;
               }}
             />
           )}
-          <OverlayTracking
-            pontosPose={pontosPose}
+          <RastreamentoMao
             pontosMao={pontosMao}
             pontosMaos={pontosMaos}
             espelhado={tipoCamera === 'front'}
+            dimensoesVista={dimensoesVista}
+            tamanhoQuadro={tamanhoQuadro}
           />
           <TouchableOpacity
             style={estilos.etiquetaCamera}
@@ -919,8 +1224,8 @@ function AplicativoPrincipal() {
           >
             <Text style={estilos.textoEtiquetaCamera}>
               {!cameraPronta
-                ? "Iniciando camera..."
-                : (tipoCamera === 'front' ? "Camera: Frontal" : "Camera: Traseira")}
+                ? 'Iniciando camera...'
+                : (tipoCamera === 'front' ? 'Camera: Frontal' : 'Camera: Traseira')}
             </Text>
           </TouchableOpacity>
         </View>
@@ -929,14 +1234,12 @@ function AplicativoPrincipal() {
           <View style={estilos.caixaPrevisao}>
             <Text style={estilos.rotuloPainel}>Sinal Detectado:</Text>
             <Text style={estilos.valorPrevisao}>{letraAtual}</Text>
-            <Text style={estilos.valorConfianca}>
-              {modeloExperimentalDisponivel ? 'Pontuação experimental (não calibrada)' : 'Confianca'}: {confianca}%
-            </Text>
+            <Text style={estilos.valorConfianca}>Confianca: {confianca}%</Text>
           </View>
 
           <View style={estilos.caixaTexto}>
             <Text style={estilos.rotuloPainel}>Texto Traduzido:</Text>
-            <Text style={estilos.valorTexto}>{textoCompleto || "(nenhum sinal gravado)"}</Text>
+            <Text style={estilos.valorTexto}>{textoCompleto || '(nenhum sinal gravado)'}</Text>
           </View>
         </View>
 
@@ -944,7 +1247,7 @@ function AplicativoPrincipal() {
           <TouchableOpacity
             style={[
               estilos.botaoDestaque,
-              contagemRegressiva > 0 || gravandoGesto ? estilos.botaoGravando : null
+              contagemRegressiva > 0 || gravandoGesto ? estilos.botaoGravando : null,
             ]}
             onPress={iniciarGravacaoGesto}
             disabled={contagemRegressiva > 0 || gravandoGesto || !cameraPronta}
@@ -954,7 +1257,7 @@ function AplicativoPrincipal() {
                 ? `Prepare-se (${contagemRegressiva}s)...`
                 : gravandoGesto
                 ? `Gravando Gesto... (${tempoGestoRestante}s)`
-                : "Gravar Gesto Longo (2.5s)"}
+                : 'Gravar Gesto Longo (2.5s)'}
             </Text>
           </TouchableOpacity>
 
@@ -964,7 +1267,7 @@ function AplicativoPrincipal() {
             disabled={gravandoGesto}
           >
             <Text style={estilos.textoBotao}>
-              {capturando ? "Pausar Traducao Continua" : "Iniciar Traducao Continua"}
+              {capturando ? 'Pausar Traducao Continua' : 'Iniciar Traducao Continua'}
             </Text>
           </TouchableOpacity>
 
@@ -996,8 +1299,8 @@ function AplicativoPrincipal() {
           >
             <Text style={estilos.textoBotaoSecundario}>
               {!cameraPronta
-                ? "Trocando Camera..."
-                : (tipoCamera === 'front' ? "Trocar para Camera Traseira" : "Trocar para Camera Frontal")}
+                ? 'Trocando Camera...'
+                : (tipoCamera === 'front' ? 'Trocar para Camera Traseira' : 'Trocar para Camera Frontal')}
             </Text>
           </TouchableOpacity>
         </View>
@@ -1083,7 +1386,8 @@ const estilos = StyleSheet.create({
   },
   areaCamera: {
     width: '100%',
-    height: 300,
+    aspectRatio: 3 / 4,
+    maxHeight: 420,
     borderRadius: 8,
     overflow: 'hidden',
     borderWidth: 1,

@@ -7,8 +7,6 @@ node_modules/
 dist/
 web-build/
 *.apk
-/LIBRAS-EQT-UECE-Landmarks.zip
-/servidor/modelos_ia/candidato_libras_eqt_uece.joblib
 aplicativo/android/.gradle/
 aplicativo/android/build/
 aplicativo/android/app/build/

@@ -4,12 +4,13 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.Matrix
 import android.graphics.SurfaceTexture
 import android.os.SystemClock
 import android.util.Size
-import android.view.ViewGroup
 import android.view.Surface
 import android.view.TextureView
+import android.view.ViewGroup
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
@@ -19,19 +20,17 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.tasks.core.BaseOptions
-import com.google.mediapipe.tasks.vision.core.ImageProcessingOptions
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
 import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarker
-import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarkerResult
 import expo.modules.kotlin.AppContext
 import expo.modules.kotlin.viewevent.EventDispatcher
 import expo.modules.kotlin.views.ExpoView
 import java.nio.ByteBuffer
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import kotlin.math.sqrt
+import kotlin.math.max
 
 class LibrasNativeCameraView(context: Context, appContext: AppContext) : ExpoView(context, appContext) {
   private val previewView = TextureView(context)
@@ -45,10 +44,15 @@ class LibrasNativeCameraView(context: Context, appContext: AppContext) : ExpoVie
   private var readyNotified = false
   @Volatile private var tracking = false
   private var facing = "front"
-  private var lastTimestampMs = 0L
   private var lastError = ""
   private var layoutListener: OnLayoutChangeListener? = null
   private var bindGeneration = 0
+  private var bufferLargura = 480
+  private var bufferAltura = 640
+  private var bufferRgba: ByteArray? = null
+  private var contadorPose = 0
+  private var instanteUltimaPoseMs = 0L
+  private var ultimaPose: List<List<Double>> = emptyList()
 
   private val onLandmarks by EventDispatcher()
   private val onCameraReady by EventDispatcher()
@@ -58,14 +62,33 @@ class LibrasNativeCameraView(context: Context, appContext: AppContext) : ExpoVie
     addView(previewView, LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
     previewView.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
       override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
+        atualizarTransformacaoPrevia()
         if (active) startCamera()
       }
-      override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) = Unit
+      override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
+        atualizarTransformacaoPrevia()
+      }
       override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
         notifyCameraReady()
       }
       override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean = true
     }
+  }
+
+  private fun atualizarTransformacaoPrevia() {
+    val larguraVista = previewView.width.toFloat()
+    val alturaVista = previewView.height.toFloat()
+    val largBuf = bufferLargura.toFloat()
+    val altBuf = bufferAltura.toFloat()
+    if (larguraVista <= 0f || alturaVista <= 0f || largBuf <= 0f || altBuf <= 0f) return
+
+    val escala = max(larguraVista / largBuf, alturaVista / altBuf)
+    val escalaX = (largBuf * escala) / larguraVista
+    val escalaY = (altBuf * escala) / alturaVista
+    val matriz = Matrix().apply {
+      setScale(escalaX, escalaY, larguraVista / 2f, alturaVista / 2f)
+    }
+    previewView.setTransform(matriz)
   }
 
   fun setActive(value: Boolean) {
@@ -89,14 +112,13 @@ class LibrasNativeCameraView(context: Context, appContext: AppContext) : ExpoVie
   private fun startCamera() {
     val generation = ++bindGeneration
     readyNotified = false
-    // Wait until React Native has measured the embedded PreviewView. Binding a
-    // CameraX preview to a zero-sized TextureView can leave its surface black.
     if (previewView.width == 0 || previewView.height == 0 || !previewView.isAvailable) {
       if (layoutListener == null) {
         val listener = OnLayoutChangeListener { view, _, _, _, _, _, _, _, _ ->
           if (view.width > 0 && view.height > 0) {
             layoutListener?.let(view::removeOnLayoutChangeListener)
             layoutListener = null
+            atualizarTransformacaoPrevia()
             if (active) startCamera()
           }
         }
@@ -123,25 +145,40 @@ class LibrasNativeCameraView(context: Context, appContext: AppContext) : ExpoVie
         val provider = providerFuture.get()
         cameraProvider = provider
         val displayRotation = previewView.display?.rotation ?: Surface.ROTATION_0
-        // Match Preview and ImageAnalysis to the current display orientation.
+        val executorPrincipal = ContextCompat.getMainExecutor(context)
+
         val preview = Preview.Builder()
           .setTargetRotation(displayRotation)
           .build()
-        preview.setSurfaceProvider(ContextCompat.getMainExecutor(context)) { request ->
+        preview.setSurfaceProvider(executorPrincipal) { request ->
           val texture = previewView.surfaceTexture
           if (texture == null || !previewView.isAvailable) {
             request.willNotProvideSurface()
             return@setSurfaceProvider
           }
+          request.setTransformationInfoListener(executorPrincipal) { info ->
+            val rot = ((info.rotationDegrees % 360) + 360) % 360
+            if (rot == 90 || rot == 270) {
+              bufferLargura = request.resolution.height
+              bufferAltura = request.resolution.width
+            } else {
+              bufferLargura = request.resolution.width
+              bufferAltura = request.resolution.height
+            }
+            atualizarTransformacaoPrevia()
+          }
           texture.setDefaultBufferSize(request.resolution.width, request.resolution.height)
           val surface = Surface(texture)
-          request.provideSurface(surface, ContextCompat.getMainExecutor(context)) { result ->
+          request.provideSurface(surface, executorPrincipal) { result ->
             surface.release()
-            if (result.resultCode == androidx.camera.core.SurfaceRequest.Result.RESULT_SURFACE_USED_SUCCESSFULLY) notifyCameraReady()
+            if (result.resultCode == androidx.camera.core.SurfaceRequest.Result.RESULT_SURFACE_USED_SUCCESSFULLY) {
+              notifyCameraReady()
+            }
           }
         }
+
         val analysis = ImageAnalysis.Builder()
-          .setTargetResolution(Size(640, 480))
+          .setTargetResolution(Size(360, 480))
           .setTargetRotation(displayRotation)
           .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
           .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
@@ -162,6 +199,7 @@ class LibrasNativeCameraView(context: Context, appContext: AppContext) : ExpoVie
       }
     }, ContextCompat.getMainExecutor(context))
   }
+
   private fun notifyCameraReady() {
     if (!active || readyNotified) return
     readyNotified = true
@@ -184,6 +222,8 @@ class LibrasNativeCameraView(context: Context, appContext: AppContext) : ExpoVie
       try { poseLandmarker?.close() } catch (_: Exception) {}
       handLandmarker = null
       poseLandmarker = null
+      ultimaPose = emptyList()
+      contadorPose = 0
     }
   }
 
@@ -192,17 +232,15 @@ class LibrasNativeCameraView(context: Context, appContext: AppContext) : ExpoVie
     val handOptions = HandLandmarker.HandLandmarkerOptions.builder()
       .setBaseOptions(BaseOptions.builder().setModelAssetPath("marcador_maos.task").build())
       .setNumHands(2)
-      .setMinHandDetectionConfidence(0.20f)
+      .setMinHandDetectionConfidence(0.25f)
       .setMinHandPresenceConfidence(0.25f)
-      .setMinTrackingConfidence(0.30f)
-      .setRunningMode(RunningMode.VIDEO)
+      .setRunningMode(RunningMode.IMAGE)
       .build()
     val poseOptions = PoseLandmarker.PoseLandmarkerOptions.builder()
       .setBaseOptions(BaseOptions.builder().setModelAssetPath("marcador_pose.task").build())
       .setNumPoses(1)
-      .setMinPoseDetectionConfidence(0.5f)
-      .setMinTrackingConfidence(0.55f)
-      .setRunningMode(RunningMode.VIDEO)
+      .setMinPoseDetectionConfidence(0.45f)
+      .setRunningMode(RunningMode.IMAGE)
       .build()
     handLandmarker = HandLandmarker.createFromOptions(context, handOptions)
     poseLandmarker = PoseLandmarker.createFromOptions(context, poseOptions)
@@ -210,28 +248,54 @@ class LibrasNativeCameraView(context: Context, appContext: AppContext) : ExpoVie
 
   private fun analyzeFrame(proxy: ImageProxy) {
     val inicioNs = SystemClock.elapsedRealtimeNanos()
-    var bitmap: Bitmap? = null
+    var rawBitmap: Bitmap? = null
+    var uprightBitmap: Bitmap? = null
     try {
       if (!tracking) return
       ensureLandmarkers()
-      val frameBitmap = rgbaToBitmap(proxy)
-      bitmap = frameBitmap
-      val image = BitmapImageBuilder(frameBitmap).build()
-      val rotation = ImageProcessingOptions.builder()
-        .setRotationDegrees(proxy.imageInfo.rotationDegrees)
-        .build()
-      val timestamp = maxOf(SystemClock.elapsedRealtime(), lastTimestampMs + 1)
-      lastTimestampMs = timestamp
+      rawBitmap = rgbaToBitmap(proxy)
+      val graus = ((proxy.imageInfo.rotationDegrees % 360) + 360) % 360
+      uprightBitmap = if (graus != 0) {
+        val matriz = Matrix().apply { postRotate(graus.toFloat()) }
+        Bitmap.createBitmap(rawBitmap, 0, 0, rawBitmap.width, rawBitmap.height, matriz, true)
+      } else {
+        rawBitmap
+      }
 
-      val pose = poseLandmarker!!.detectForVideo(image, rotation, timestamp)
-      val hands = handLandmarker!!.detectForVideo(image, rotation, timestamp)
+      val image = BitmapImageBuilder(uprightBitmap).build()
+      val agoraMs = SystemClock.elapsedRealtime()
+
+      val hands = handLandmarker!!.detect(image)
+      if (hands.landmarks().isNotEmpty()) {
+        val atualizarPose = (contadorPose % 4 == 0) || (agoraMs - instanteUltimaPoseMs) > 1000L
+        contadorPose++
+        if (atualizarPose) {
+          val pose = poseLandmarker!!.detect(image)
+          instanteUltimaPoseMs = agoraMs
+          val poseLandmarks = pose.landmarks().firstOrNull()
+          if (poseLandmarks != null) {
+            val headIndices = intArrayOf(0, 2, 5, 7, 8, 9, 10)
+            val armIndices = intArrayOf(11, 12, 13, 14, 15, 16)
+            ultimaPose = (headIndices + armIndices).map { idx ->
+              val p = poseLandmarks[idx]
+              listOf(p.x().toDouble(), p.y().toDouble())
+            }
+          } else {
+            ultimaPose = emptyList()
+          }
+        }
+      }
+
       val tempoMs = (SystemClock.elapsedRealtimeNanos() - inicioNs) / 1_000_000.0
-      emitLandmarks(pose, hands, tempoMs, proxy.imageInfo.rotationDegrees)
+      emitLandmarks(ultimaPose, hands, tempoMs, uprightBitmap.width, uprightBitmap.height)
       lastError = ""
     } catch (error: Exception) {
       reportError(error.message ?: "Falha no rastreamento local.")
     } finally {
-      bitmap?.recycle()
+      if (uprightBitmap != null && uprightBitmap !== rawBitmap) {
+        uprightBitmap.recycle()
+      }
+      rawBitmap?.recycle()
       proxy.close()
     }
   }
@@ -243,13 +307,16 @@ class LibrasNativeCameraView(context: Context, appContext: AppContext) : ExpoVie
     val source = plane.buffer.duplicate()
     val sourceStride = plane.rowStride
     val sourcePixelStride = plane.pixelStride
-    val rgba = ByteArray(width * height * 4)
+    val totalBytes = width * height * 4
+    var rgba = bufferRgba
+    if (rgba == null || rgba.size != totalBytes) {
+      rgba = ByteArray(totalBytes)
+      bufferRgba = rgba
+    }
     for (y in 0 until height) {
       for (x in 0 until width) {
         val input = y * sourceStride + x * sourcePixelStride
         val output = (y * width + x) * 4
-        // CameraX provides bytes as R,G,B,A. Android ARGB_8888 bitmaps store
-        // pixel bytes as B,G,R,A on Android's little-endian devices.
         rgba[output] = source.get(input + 2)
         rgba[output + 1] = source.get(input + 1)
         rgba[output + 2] = source.get(input)
@@ -261,118 +328,39 @@ class LibrasNativeCameraView(context: Context, appContext: AppContext) : ExpoVie
     }
   }
 
-  private fun emitLandmarks(poseResult: PoseLandmarkerResult, handResult: HandLandmarkerResult, tempoMs: Double, rotationDegrees: Int) {
-    val poseLandmarks = poseResult.landmarks().firstOrNull()
-    val hasPose = poseLandmarks != null
-    val hands = handResult.landmarks()
-    val hasHand = hands.isNotEmpty()
+  private fun emitLandmarks(
+    rawPose: List<List<Double>>,
+    handResult: HandLandmarkerResult,
+    tempoMs: Double,
+    larguraQuadro: Int,
+    alturaQuadro: Int
+  ) {
+    val hasPose = rawPose.isNotEmpty()
+    val hands = handResult.landmarks().sortedBy { it[0].y() }
+    val selectedHand = hands.firstOrNull()
 
-    val headIndices = intArrayOf(0, 2, 5, 7, 8, 9, 10)
-    val armIndices = intArrayOf(11, 12, 13, 14, 15, 16)
-    val head = MutableList(7) { DoubleArray(3) }
-    val arms = MutableList(6) { DoubleArray(3) }
-    val rawPose = mutableListOf<List<Double>>()
-
-    if (poseLandmarks != null) {
-      for (i in headIndices.indices) {
-        val point = poseLandmarks[headIndices[i]]
-        head[i] = doubleArrayOf(point.x().toDouble(), point.y().toDouble(), point.z().toDouble())
-      }
-      for (i in armIndices.indices) {
-        val point = poseLandmarks[armIndices[i]]
-        arms[i] = doubleArrayOf(point.x().toDouble(), point.y().toDouble(), point.z().toDouble())
-      }
-      for (index in headIndices + armIndices) {
-        val point = poseLandmarks[index]
-        rawPose.add(coordenadasNaOrientacaoDoDisplay(point.x().toDouble(), point.y().toDouble(), rotationDegrees))
-      }
+    val rawHands = hands.map { hand ->
+      hand.map { listOf(it.x().toDouble(), it.y().toDouble()) }
     }
-
-    val rawHands = hands.map { hand -> hand.map { coordenadasNaOrientacaoDoDisplay(it.x().toDouble(), it.y().toDouble(), rotationDegrees) } }
-    val selectedHand = if (hasHand) {
-      if (poseLandmarks != null) {
-        val wrists = listOf(arms[4], arms[5])
-        val nearest = hands.minByOrNull { hand ->
-          wrists.minOf { wrist -> distance2d(hand[0].x().toDouble(), hand[0].y().toDouble(), wrist[0], wrist[1]) }
-        }
-        nearest?.takeIf { hand ->
-          wrists.minOf { wrist -> distance2d(hand[0].x().toDouble(), hand[0].y().toDouble(), wrist[0], wrist[1]) } <= 0.0324
-        }
-      } else hands.first()
-    } else null
-
-    val handPoints = MutableList(21) { DoubleArray(3) }
-    if (selectedHand != null) {
-      for (i in selectedHand.indices) {
-        val point = selectedHand[i]
-        handPoints[i] = doubleArrayOf(point.x().toDouble(), point.y().toDouble(), point.z().toDouble())
-      }
-    } else if (poseLandmarks != null) {
-      for (i in handPoints.indices) handPoints[i] = arms[5].copyOf()
+    val modelHands3d = hands.map { hand ->
+      hand.map { listOf(it.x().toDouble(), it.y().toDouble(), it.z().toDouble()) }
     }
+    val selectedRawHand = selectedHand?.map { listOf(it.x().toDouble(), it.y().toDouble()) } ?: emptyList()
+    val selectedModelHand = modelHands3d.firstOrNull() ?: emptyList()
 
-    val allPoints = head + arms + handPoints
-    val reference = if (hasPose) {
-      DoubleArray(3) { (allPoints[7][it] + allPoints[8][it]) / 2.0 }
-    } else allPoints[13].copyOf()
-    val adjusted = allPoints.map { point -> DoubleArray(3) { point[it] - reference[it] } }
-    val scale = adjusted.maxOf { point -> sqrt(point.sumOf { it * it }) }.coerceAtLeast(1e-9)
-    val vector = adjusted.flatMap { point -> point.map { it / scale } }
-
-    val selectedRawHand = selectedHand?.map { coordenadasNaOrientacaoDoDisplay(it.x().toDouble(), it.y().toDouble(), rotationDegrees) } ?: emptyList()
-    val selectedModelHand = selectedHand?.map { point ->
-      val xy = coordenadasNaOrientacaoDoDisplay(point.x().toDouble(), point.y().toDouble(), rotationDegrees)
-      listOf(xy[0], xy[1], point.z().toDouble())
-    } ?: emptyList()
-    // The classifier was trained with a complete upper-body + hand vector.
-    // Never fabricate zero-valued body/hand landmarks when either detector
-    // misses; those vectors produced confident but meaningless translations.
-    if (!hasPose || selectedHand == null) {
-      onLandmarks(mapOf(
-        "tem_pose" to hasPose,
-        "tem_mao" to hasHand,
-        "maos_detectadas" to hands.size,
-        "diagnostico" to when {
-          !hasHand -> "Nenhuma mao detectada; centralize a palma e melhore a iluminacao."
-          selectedHand == null -> "Mao detectada, mas o pulso nao foi associado ao braco."
-          else -> "Parte superior do corpo nao detectada."
-        },
-        "vetor" to emptyList<Double>(),
-        "tempo_ms" to tempoMs,
-        "pontos_pose" to rawPose,
-        "pontos_mao" to selectedRawHand,
-        "pontos_mao_3d" to selectedModelHand,
-        "pontos_maos" to rawHands
-      ))
-      return
-    }
-
-    val event = mutableMapOf<String, Any>(
+    onLandmarks(mapOf(
       "tem_pose" to hasPose,
-      "tem_mao" to hasHand,
-      "vetor" to vector,
+      "tem_mao" to (selectedHand != null),
+      "maos_detectadas" to hands.size,
+      "largura_quadro" to larguraQuadro,
+      "altura_quadro" to alturaQuadro,
       "tempo_ms" to tempoMs,
       "pontos_pose" to rawPose,
       "pontos_mao" to selectedRawHand,
       "pontos_mao_3d" to selectedModelHand,
-      "pontos_maos" to rawHands
-    )
-    onLandmarks(event)
-  }
-
-  /** Maps normalized ImageAnalysis coordinates to the display orientation used by Preview. */
-  private fun coordenadasNaOrientacaoDoDisplay(x: Double, y: Double, rotationDegrees: Int): List<Double> {
-    return when (((rotationDegrees % 360) + 360) % 360) {
-      90 -> listOf(1.0 - y, x)
-      180 -> listOf(1.0 - x, 1.0 - y)
-      270 -> listOf(y, 1.0 - x)
-      else -> listOf(x, y)
-    }
-  }
-  private fun distance2d(x1: Double, y1: Double, x2: Double, y2: Double): Double {
-    val dx = x1 - x2
-    val dy = y1 - y2
-    return dx * dx + dy * dy
+      "pontos_maos" to rawHands,
+      "pontos_maos_3d" to modelHands3d
+    ))
   }
 
   private fun reportError(message: String) {
