@@ -1,32 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, TextInput, ScrollView, Platform, NativeModules } from 'react-native';
-import { CameraView, useCameraPermissions } from 'expo-camera';
-import { File } from 'expo-file-system';
+import { StyleSheet, Text, View, TouchableOpacity, ScrollView } from 'react-native';
+import { useCameraPermissions } from 'expo-camera';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
-import Svg, { Circle, Line } from 'react-native-svg';
 import LibrasNativeCamera from './modules/libras-native';
 import modeloLocal from './assets/modelo_libras_mobile.json';
 
-const usarCameraNativa = Platform.OS === 'android' && LibrasNativeCamera !== null;
 const JANELA_TEMPORAL_MS = 1100;
-
-function obterIpPadraoServidor() {
-  const urlScript = NativeModules?.SourceCode?.scriptURL || '';
-  const resultado = urlScript.match(/^https?:\/\/(\d+\.\d+\.\d+\.\d+)/);
-  if (resultado && resultado[1] && resultado[1] !== '127.0.0.1') {
-    return resultado[1];
-  }
-  return '192.168.0.16';
-}
-
-const CONEXOES_MAO = [
-  [0, 1], [1, 2], [2, 3], [3, 4],
-  [0, 5], [5, 6], [6, 7], [7, 8],
-  [0, 9], [9, 10], [10, 11], [11, 12],
-  [0, 13], [13, 14], [14, 15], [15, 16],
-  [0, 17], [17, 18], [18, 19], [19, 20],
-  [5, 9], [9, 13], [13, 17], [0, 17],
-];
 
 function limitar(valor, minimo, maximo) {
   return Math.max(minimo, Math.min(maximo, valor));
@@ -116,22 +95,35 @@ function calcularVetorQuadro(pontosMao3d, larguraQuadro = 480, alturaQuadro = 64
     valores.push(norma3d(h[4], h[b]));
   }
 
+  let poseValida = false;
   if (Array.isArray(pontosPose) && pontosPose.length >= 9) {
-    const narizX = Number(pontosPose[0][0]) * escalaX;
-    const narizY = Number(pontosPose[0][1]) * escalaY;
-    const ombroEsqX = Number(pontosPose[7][0]) * escalaX;
-    const ombroEsqY = Number(pontosPose[7][1]) * escalaY;
-    const ombroDirX = Number(pontosPose[8][0]) * escalaX;
-    const ombroDirY = Number(pontosPose[8][1]) * escalaY;
-    const largOmbros = Math.max(Math.hypot(ombroEsqX - ombroDirX, ombroEsqY - ombroDirY), 0.12);
-
-    valores.push(
-      limitar((pulso[1] - narizY) / largOmbros, -2.0, 2.5),
-      limitar((mao[8][1] - narizY) / largOmbros, -2.0, 2.5),
-      limitar(Math.abs(pulso[0] - narizX) / largOmbros, 0.0, 2.5),
-      1.0
-    );
-  } else {
+    const p0 = pontosPose[0];
+    const p7 = pontosPose[7];
+    const p8 = pontosPose[8];
+    if (Array.isArray(p0) && Array.isArray(p7) && Array.isArray(p8)) {
+      const narizX = Number(p0[0]) * escalaX;
+      const narizY = Number(p0[1]) * escalaY;
+      const ombroEsqX = Number(p7[0]) * escalaX;
+      const ombroEsqY = Number(p7[1]) * escalaY;
+      const ombroDirX = Number(p8[0]) * escalaX;
+      const ombroDirY = Number(p8[1]) * escalaY;
+      if (
+        Number.isFinite(narizX) && Number.isFinite(narizY) &&
+        Number.isFinite(ombroEsqX) && Number.isFinite(ombroEsqY) &&
+        Number.isFinite(ombroDirX) && Number.isFinite(ombroDirY)
+      ) {
+        const largOmbros = Math.max(Math.hypot(ombroEsqX - ombroDirX, ombroEsqY - ombroDirY), 0.12);
+        valores.push(
+          limitar((pulso[1] - narizY) / largOmbros, -2.0, 2.5),
+          limitar((mao[8][1] - narizY) / largOmbros, -2.0, 2.5),
+          limitar(Math.abs(pulso[0] - narizX) / largOmbros, 0.0, 2.5),
+          1.0
+        );
+        poseValida = true;
+      }
+    }
+  }
+  if (!poseValida) {
     valores.push(
       limitar((Number(pontosMao3d[0][1]) - 0.30) * 2.0, -2.0, 2.5),
       limitar((Number(pontosMao3d[8][1]) - 0.30) * 2.0, -2.0, 2.5),
@@ -328,139 +320,22 @@ function escolherRotuloVotacao(votacoes) {
   return { predicao: aceito ? melhorRotulo : '', mediaConf };
 }
 
-const RastreamentoMao = React.memo(function RastreamentoMao({
-  pontosMao,
-  pontosMaos,
-  espelhado,
-  dimensoesVista,
-  tamanhoQuadro,
-}) {
-  const larguraVista = dimensoesVista.largura;
-  const alturaVista = dimensoesVista.altura;
-  if (larguraVista <= 0 || alturaVista <= 0) return null;
-
-  const larguraQuadro = tamanhoQuadro.largura;
-  const alturaQuadro = tamanhoQuadro.altura;
-
-  function converterPonto(ponto) {
-    const nx = espelhado ? 1 - ponto[0] : ponto[0];
-    const ny = ponto[1];
-
-    if (larguraQuadro > 0 && alturaQuadro > 0) {
-      const escala = Math.max(larguraVista / larguraQuadro, alturaVista / alturaQuadro);
-      const larguraRenderizada = larguraQuadro * escala;
-      const alturaRenderizada = alturaQuadro * escala;
-      const corteX = (larguraRenderizada - larguraVista) / 2;
-      const corteY = (alturaRenderizada - alturaVista) / 2;
-      return {
-        x: nx * larguraRenderizada - corteX,
-        y: ny * alturaRenderizada - corteY,
-      };
-    }
-
-    return {
-      x: nx * larguraVista,
-      y: ny * alturaVista,
-    };
-  }
-
-  const maosVisuais = pontosMaos && pontosMaos.length > 0
-    ? pontosMaos
-    : (pontosMao && pontosMao.length === 21 ? [pontosMao] : []);
-
-  if (maosVisuais.length === 0) return null;
-
-  const elementos = [];
-  maosVisuais.forEach((mao, indiceMao) => {
-    if (!mao || mao.length !== 21) return;
-
-    CONEXOES_MAO.forEach((conexao, i) => {
-      const p1 = converterPonto(mao[conexao[0]]);
-      const p2 = converterPonto(mao[conexao[1]]);
-      elementos.push(
-        <Line
-          key={`linha-${indiceMao}-${i}`}
-          x1={p1.x}
-          y1={p1.y}
-          x2={p2.x}
-          y2={p2.y}
-          stroke="#16A34A"
-          strokeWidth={3}
-          strokeLinecap="round"
-        />
-      );
-    });
-
-    mao.forEach((ponto, i) => {
-      const p = converterPonto(ponto);
-      elementos.push(
-        <Circle
-          key={`ponto-${indiceMao}-${i}`}
-          cx={p.x}
-          cy={p.y}
-          r={i === 0 ? 5.5 : 4.5}
-          fill="#FFFFFF"
-          stroke="#15803D"
-          strokeWidth={2}
-        />
-      );
-    });
-  });
-
-  if (elementos.length === 0) return null;
-
-  return (
-    <View style={estilosOverlay.container} pointerEvents="none">
-      <Svg width={larguraVista} height={alturaVista}>
-        {elementos}
-      </Svg>
-    </View>
-  );
-});
-
-const estilosOverlay = StyleSheet.create({
-  container: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-  },
-});
-
 function AplicativoPrincipal() {
   const [permissao, pedirPermissao] = useCameraPermissions();
   const [tipoCamera, setTipoCamera] = useState('front');
-  const [cameraPronta, setCameraPronta] = useState(!usarCameraNativa);
-  const [tamanhoFoto, setTamanhoFoto] = useState(undefined);
-  const [dimensoesVista, setDimensoesVista] = useState({ largura: 0, altura: 0 });
-  const [tamanhoQuadro, setTamanhoQuadro] = useState({ largura: 360, altura: 480 });
-  const [statusConexao, setStatusConexao] = useState(
-    usarCameraNativa ? 'Rastreamento local ativo' : 'Desconectado'
-  );
-  const [latencia, setLatencia] = useState(0);
-  const [latenciaServidor, setLatenciaServidor] = useState(0);
+  const [cameraPronta, setCameraPronta] = useState(false);
+  const [tempoInferencia, setTempoInferencia] = useState(0);
   const [letraAtual, setLetraAtual] = useState('-');
   const [confianca, setConfianca] = useState(0);
   const [textoCompleto, setTextoCompleto] = useState('');
-  const [capturando, setCapturando] = useState(false);
-  const [ipServidor, setIpServidor] = useState(obterIpPadraoServidor);
+  const [capturando, setCapturando] = useState(true);
   const [quadrosBuffer, setQuadrosBuffer] = useState(0);
   const [gravandoGesto, setGravandoGesto] = useState(false);
   const [tempoGestoRestante, setTempoGestoRestante] = useState(0);
   const [contagemRegressiva, setContagemRegressiva] = useState(0);
-  const [pontosMao, setPontosMao] = useState([]);
-  const [pontosMaos, setPontosMaos] = useState([]);
 
-  const cameraRef = useRef(null);
-  const capturandoRef = useRef(false);
+  const capturandoRef = useRef(true);
   const trocandoCameraRef = useRef(false);
-  const socketRef = useRef(null);
-  const timerCapturaRef = useRef(null);
-  const enviandoRef = useRef(false);
-  const aguardandoRespostaRef = useRef(false);
-  const quadroPendenteRef = useRef(null);
-  const inicioQuadroRef = useRef(0);
   const ultimaLetraRef = useRef('');
   const ultimoSinalInseridoRef = useRef('');
   const contagemEstavelRef = useRef(0);
@@ -470,182 +345,35 @@ function AplicativoPrincipal() {
   const melhorPredicaoGestoRef = useRef({ rotulo: '', conf: 0, contagem: 0 });
   const historicoLocalRef = useRef([]);
   const falhasMaoLocalRef = useRef(0);
-  const quadrosSemMaoWsRef = useRef(0);
   const estavaEmMovimentoLocalRef = useRef(false);
+  const ultimoTempoUiRef = useRef(0);
+  const timerPreparacaoRef = useRef(null);
+  const timerProgressoRef = useRef(null);
+  const timerCameraRef = useRef(null);
 
   useEffect(() => {
-    if (usarCameraNativa) {
-      setStatusConexao('Rastreamento local ativo');
-      return () => pararCaptura();
-    }
-    conectarSocket();
     return () => {
-      fecharSocket();
-      pararCaptura();
+      if (timerPreparacaoRef.current) clearInterval(timerPreparacaoRef.current);
+      if (timerProgressoRef.current) clearInterval(timerProgressoRef.current);
+      if (timerCameraRef.current) clearTimeout(timerCameraRef.current);
     };
-  }, [ipServidor]);
+  }, []);
 
-  function atualizarDimensoesQuadro(largura, altura) {
-    if (!largura || !altura) return;
-    setTamanhoQuadro((atual) => (
-      atual.largura === largura && atual.altura === altura
-        ? atual
-        : { largura, altura }
-    ));
-  }
-
-  function fecharSocket() {
-    if (socketRef.current) {
-      socketRef.current.close();
-      socketRef.current = null;
-    }
+  function atualizarTempoUi(valorMs) {
+    const agora = Date.now();
+    if (agora - ultimoTempoUiRef.current < 200) return;
+    ultimoTempoUiRef.current = agora;
+    setTempoInferencia((atual) => (atual === valorMs ? atual : valorMs));
   }
 
   function limparHistoricoPredicao() {
     historicoLocalRef.current = [];
     votacoesModeloRef.current = [];
     falhasMaoLocalRef.current = 0;
-    quadrosSemMaoWsRef.current = 0;
     estavaEmMovimentoLocalRef.current = false;
     ultimaLetraRef.current = '';
     ultimoSinalInseridoRef.current = '';
     contagemEstavelRef.current = 0;
-  }
-
-  function enviarQuadroSocket(base64) {
-    if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) {
-      return false;
-    }
-    aguardandoRespostaRef.current = true;
-    inicioQuadroRef.current = Date.now();
-    socketRef.current.send(base64);
-    return true;
-  }
-
-  function conectarSocket() {
-    if (usarCameraNativa) {
-      setStatusConexao('Rastreamento local ativo');
-      return;
-    }
-    fecharSocket();
-    setStatusConexao('Conectando...');
-
-    try {
-      const url = `ws://${ipServidor}:8000/ws`;
-      const ws = new WebSocket(url);
-
-      ws.onopen = () => {
-        setStatusConexao('Conectado');
-        agendarProximoQuadro();
-      };
-
-      ws.onmessage = (evento) => {
-        aguardandoRespostaRef.current = false;
-        const latenciaQuadro = inicioQuadroRef.current
-          ? Date.now() - inicioQuadroRef.current
-          : 0;
-        inicioQuadroRef.current = 0;
-        if (latenciaQuadro) setLatencia(latenciaQuadro);
-
-        const pendente = quadroPendenteRef.current;
-        if (pendente && socketRef.current === ws && (capturandoRef.current || gravandoGestoRef.current)) {
-          quadroPendenteRef.current = null;
-          enviarQuadroSocket(pendente);
-        }
-
-        try {
-          const dados = JSON.parse(evento.data);
-          if (typeof dados.tempo_ms === 'number') {
-            setLatenciaServidor(Math.round(dados.tempo_ms));
-          }
-          atualizarDimensoesQuadro(dados.largura_quadro, dados.altura_quadro);
-
-          if (dados.status === 'ok') {
-            quadrosSemMaoWsRef.current = 0;
-            const predicao = dados.previsao || dados.prediction || '';
-            const conf = dados.confianca || dados.confidence || 0;
-            const tempoServidor = dados.tempo_ms || 0;
-            const bufferLen = dados.quadros_buffer || 0;
-
-            if (!latenciaQuadro) setLatencia(Math.round(tempoServidor));
-            setQuadrosBuffer(bufferLen);
-            setPontosMao(dados.pontos_mao || []);
-            setPontosMaos(dados.pontos_maos || []);
-
-            if (predicao && conf >= 0.38) {
-              setLetraAtual(predicao);
-              setConfianca(Math.round(conf * 100));
-            } else {
-              setLetraAtual('Analisando sinal...');
-              setConfianca(0);
-            }
-
-            if (gravandoGestoRef.current && predicao && conf >= 0.40) {
-              const anterior = melhorPredicaoGestoRef.current;
-              const contagem = anterior.rotulo === predicao ? anterior.contagem + 1 : 1;
-              if (conf >= anterior.conf || contagem > anterior.contagem) {
-                melhorPredicaoGestoRef.current = { rotulo: predicao, conf, contagem };
-              }
-            }
-
-            if (!gravandoGestoRef.current && predicao && conf >= 0.48) {
-              if (predicao === ultimaLetraRef.current) {
-                contagemEstavelRef.current += 1;
-              } else {
-                ultimaLetraRef.current = predicao;
-                contagemEstavelRef.current = 1;
-              }
-              const prontoInserir = contagemEstavelRef.current >= 2 || (conf >= 0.66 && bufferLen >= 3);
-              if (prontoInserir && ultimoSinalInseridoRef.current !== predicao) {
-                adicionarAoTexto(predicao);
-                ultimoSinalInseridoRef.current = predicao;
-              }
-            } else if (!gravandoGestoRef.current && !predicao) {
-              ultimaLetraRef.current = '';
-              contagemEstavelRef.current = 0;
-            }
-          } else {
-            quadrosSemMaoWsRef.current += 1;
-            if (quadrosSemMaoWsRef.current >= 3) {
-              setPontosMao([]);
-              setPontosMaos([]);
-              setQuadrosBuffer(0);
-              ultimaLetraRef.current = '';
-              ultimoSinalInseridoRef.current = '';
-              contagemEstavelRef.current = 0;
-              if (!gravandoGestoRef.current) {
-                setLetraAtual('Mostre a mao na camera');
-                setConfianca(0);
-              }
-            }
-          }
-        } catch {
-          inicioQuadroRef.current = 0;
-        }
-
-        if (socketRef.current === ws && !enviandoRef.current && !quadroPendenteRef.current) {
-          agendarProximoQuadro();
-        }
-      };
-
-      ws.onerror = () => {
-        aguardandoRespostaRef.current = false;
-        quadroPendenteRef.current = null;
-        inicioQuadroRef.current = 0;
-        setStatusConexao('Erro de conexao');
-      };
-
-      ws.onclose = () => {
-        aguardandoRespostaRef.current = false;
-        quadroPendenteRef.current = null;
-        inicioQuadroRef.current = 0;
-        setStatusConexao('Desconectado');
-      };
-
-      socketRef.current = ws;
-    } catch {
-      setStatusConexao('Falha ao abrir socket');
-    }
   }
 
   function adicionarAoTexto(sinal) {
@@ -673,15 +401,6 @@ function AplicativoPrincipal() {
     });
   }
 
-  function agendarProximoQuadro(atrasoMs = 0) {
-    if (!capturandoRef.current && !gravandoGestoRef.current) return;
-    if (timerCapturaRef.current) clearTimeout(timerCapturaRef.current);
-    timerCapturaRef.current = setTimeout(() => {
-      timerCapturaRef.current = null;
-      capturarEEnviar();
-    }, atrasoMs);
-  }
-
   function apagarUltimo() {
     setTextoCompleto((anterior) => {
       if (!anterior) return '';
@@ -695,38 +414,30 @@ function AplicativoPrincipal() {
   }
 
   function receberQuadroLocal(evento) {
+    try {
+      processarQuadroLocal(evento);
+    } catch (_erro) {}
+  }
+
+  function processarQuadroLocal(evento) {
     const dados = evento?.nativeEvent || {};
     const inicioClassificacao = Date.now();
     const tempoRastreamento = typeof dados.tempo_ms === 'number' ? Math.round(dados.tempo_ms) : 0;
 
-    atualizarDimensoesQuadro(dados.largura_quadro, dados.altura_quadro);
-    const temPontos = (Array.isArray(dados.pontos_maos) && dados.pontos_maos.length > 0)
-      || (Array.isArray(dados.pontos_mao) && dados.pontos_mao.length === 21);
-    if (temPontos) {
-      setPontosMao(dados.pontos_mao || []);
-      setPontosMaos(dados.pontos_maos || []);
-    } else if (!capturandoRef.current && !gravandoGestoRef.current) {
-      setPontosMao([]);
-      setPontosMaos([]);
-    }
-    setLatencia(tempoRastreamento);
-    setLatenciaServidor(0);
-
     if (!capturandoRef.current && !gravandoGestoRef.current) {
+      atualizarTempoUi(tempoRastreamento);
       return;
     }
 
-    const listaMaos3d = Array.isArray(dados.pontos_maos_3d) && dados.pontos_maos_3d.length > 0
-      ? dados.pontos_maos_3d
-      : (dados.tem_mao && Array.isArray(dados.pontos_mao_3d) ? [dados.pontos_mao_3d] : []);
+    const listaMaos3d = Array.isArray(dados.pontos_maos_3d) ? dados.pontos_maos_3d : [];
 
     const quadrosMaos = [];
     for (let idx = 0; idx < listaMaos3d.length; idx += 1) {
       const outraMao3d = listaMaos3d.length === 2 ? listaMaos3d[1 - idx] : null;
       const q = calcularVetorQuadro(
         listaMaos3d[idx],
-        dados.largura_quadro || 360,
-        dados.altura_quadro || 480,
+        dados.largura_quadro || 240,
+        dados.altura_quadro || 320,
         dados.pontos_pose,
         outraMao3d
       );
@@ -735,26 +446,24 @@ function AplicativoPrincipal() {
 
     if (quadrosMaos.length === 0) {
       falhasMaoLocalRef.current += 1;
-      if (falhasMaoLocalRef.current >= 3) {
-        setPontosMao([]);
-        setPontosMaos([]);
-        if (!gravandoGestoRef.current) {
-          setLetraAtual('Mostre a mao na camera');
-          setConfianca(0);
-        }
+      if (falhasMaoLocalRef.current >= 3 && !gravandoGestoRef.current) {
+        setLetraAtual((atual) => (atual === 'Mostre a mao na camera' ? atual : 'Mostre a mao na camera'));
+        setConfianca((atual) => (atual === 0 ? atual : 0));
       }
       if (falhasMaoLocalRef.current >= 5) {
         limparHistoricoPredicao();
-        setQuadrosBuffer(0);
+        setQuadrosBuffer((atual) => (atual === 0 ? atual : 0));
       }
+      atualizarTempoUi(tempoRastreamento);
       return;
     }
 
     falhasMaoLocalRef.current = 0;
     const agoraMs = Date.now();
-    const trilhas = historicoLocalRef.current.filter((t) => agoraMs - t.ultimoInstante <= 1100);
+    const trilhas = historicoLocalRef.current.filter((t) => agoraMs - t.ultimoInstante <= JANELA_TEMPORAL_MS);
     const limiteDist = quadrosMaos.length === 1 && trilhas.length === 1 ? 0.85 : 0.65;
     const pares = [];
+
     for (let iq = 0; iq < quadrosMaos.length; iq += 1) {
       for (let it = 0; it < trilhas.length; it += 1) {
         const dist = Math.hypot(
@@ -803,6 +512,7 @@ function AplicativoPrincipal() {
 
     const menorY = Math.min(...trilhasAtivas.map((t) => t.centro[1]));
     const maiorY = Math.max(...trilhasAtivas.map((t) => t.centro[1]));
+
     const avaliacoes = trilhasAtivas.map((trilha) => {
       const caracteristicas = montarVetorTemporal(trilha.quadros);
       const res = preverModeloLocal(modeloLocal, caracteristicas);
@@ -837,9 +547,10 @@ function AplicativoPrincipal() {
       emMovimentoAtual = avaliacoes[0].emMovimento;
       bufferAtual = avaliacoes[0].quadros;
     }
-    setQuadrosBuffer(bufferAtual);
+    setQuadrosBuffer((atual) => (atual === bufferAtual ? atual : bufferAtual));
 
-    setLatencia(tempoRastreamento + (Date.now() - inicioClassificacao));
+    const tempoGastoClassificacao = Date.now() - inicioClassificacao;
+    atualizarTempoUi(tempoRastreamento + tempoGastoClassificacao);
 
     let votacoes = votacoesModeloRef.current;
     if (emMovimentoAtual && !estavaEmMovimentoLocalRef.current) {
@@ -854,11 +565,12 @@ function AplicativoPrincipal() {
     const { predicao, mediaConf } = escolherRotuloVotacao(votacoes);
 
     if (predicao) {
-      setLetraAtual(predicao);
-      setConfianca(Math.round(mediaConf * 100));
+      const confPct = Math.round(mediaConf * 100);
+      setLetraAtual((atual) => (atual === predicao ? atual : predicao));
+      setConfianca((atual) => (Math.abs(atual - confPct) >= 2 ? confPct : atual));
     } else if (!gravandoGestoRef.current) {
-      setLetraAtual('Analisando sinal...');
-      setConfianca(0);
+      setLetraAtual((atual) => (atual === 'Analisando sinal...' ? atual : 'Analisando sinal...'));
+      setConfianca((atual) => (atual === 0 ? atual : 0));
     }
 
     if (gravandoGestoRef.current && predicao && mediaConf >= 0.40) {
@@ -891,88 +603,12 @@ function AplicativoPrincipal() {
     }
   }
 
-  async function capturarEEnviar() {
-    if (usarCameraNativa) return;
-    if (
-      (!capturandoRef.current && !gravandoGestoRef.current) ||
-      enviandoRef.current ||
-      quadroPendenteRef.current !== null ||
-      !cameraRef.current ||
-      trocandoCameraRef.current
-    ) {
-      return;
-    }
-
-    if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) {
-      return;
-    }
-
-    enviandoRef.current = true;
-    let falhaNaCaptura = false;
-    try {
-      const foto = await cameraRef.current.takePictureAsync({
-        quality: 0.30,
-        base64: true,
-        exif: false,
-        shutterSound: false,
-      });
-
-      if (foto?.uri) {
-        try {
-          new File(foto.uri).delete();
-        } catch {}
-      }
-
-      if (foto?.base64 && (capturandoRef.current || gravandoGestoRef.current)) {
-        if (!aguardandoRespostaRef.current) {
-          enviarQuadroSocket(foto.base64);
-        } else {
-          quadroPendenteRef.current = foto.base64;
-        }
-      }
-    } catch {
-      falhaNaCaptura = true;
-    } finally {
-      enviandoRef.current = false;
-      if ((capturandoRef.current || gravandoGestoRef.current) && quadroPendenteRef.current === null) {
-        agendarProximoQuadro(falhaNaCaptura ? 80 : 0);
-      }
-    }
-  }
-
-  useEffect(() => {
-    if (capturando) {
-      capturarEEnviar();
-    } else {
-      pararCaptura();
-      if (!usarCameraNativa) {
-        setPontosMao([]);
-        setPontosMaos([]);
-      }
-    }
-    return () => pararCaptura();
-  }, [capturando]);
-
-  function pararCaptura() {
-    if (timerCapturaRef.current) {
-      clearTimeout(timerCapturaRef.current);
-      timerCapturaRef.current = null;
-    }
-    enviandoRef.current = false;
-    aguardandoRespostaRef.current = false;
-    quadroPendenteRef.current = null;
-    inicioQuadroRef.current = 0;
-  }
-
   function alternarCaptura() {
     const novo = !capturando;
     capturandoRef.current = novo;
     limparHistoricoPredicao();
     if (!novo) {
       setQuadrosBuffer(0);
-    }
-    if (usarCameraNativa) {
-      setStatusConexao(novo ? 'Traducao local ativa' : 'Rastreamento local ativo');
     }
     setCapturando(novo);
   }
@@ -982,24 +618,19 @@ function AplicativoPrincipal() {
       return;
     }
 
-    if (!usarCameraNativa && (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN)) {
-      setStatusConexao('Desconectado! Verifique o IP');
-      conectarSocket();
-      return;
-    }
-
     preparandoGestoRef.current = true;
     let contagem = 3;
     setContagemRegressiva(contagem);
     setLetraAtual(`Prepare-se (${contagem}s)...`);
 
-    const timerPreparacao = setInterval(() => {
+    timerPreparacaoRef.current = setInterval(() => {
       contagem -= 1;
       if (contagem > 0) {
         setContagemRegressiva(contagem);
         setLetraAtual(`Prepare-se (${contagem}s)...`);
       } else {
-        clearInterval(timerPreparacao);
+        clearInterval(timerPreparacaoRef.current);
+        timerPreparacaoRef.current = null;
         setContagemRegressiva(0);
         preparandoGestoRef.current = false;
         executarGravacaoGesto();
@@ -1009,36 +640,29 @@ function AplicativoPrincipal() {
 
   function executarGravacaoGesto() {
     limparHistoricoPredicao();
-    quadroPendenteRef.current = null;
-    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
-      socketRef.current.send(JSON.stringify({ tipo: 'limpar_buffer' }));
-    }
-
     gravandoGestoRef.current = true;
     setGravandoGesto(true);
     melhorPredicaoGestoRef.current = { rotulo: '', conf: 0, contagem: 0 };
     setLetraAtual('Gravando sinal...');
     setTempoGestoRestante(2.5);
 
-    capturarEEnviar();
-
     const tempoInicio = Date.now();
     const duracaoTotal = 2500;
 
-    const timerProgresso = setInterval(() => {
+    timerProgressoRef.current = setInterval(() => {
       const decorrido = Date.now() - tempoInicio;
       const restante = Math.max(0, (duracaoTotal - decorrido) / 1000).toFixed(1);
       setTempoGestoRestante(parseFloat(restante));
 
       if (decorrido >= duracaoTotal) {
-        clearInterval(timerProgresso);
+        clearInterval(timerProgressoRef.current);
+        timerProgressoRef.current = null;
         gravandoGestoRef.current = false;
         setGravandoGesto(false);
         setTempoGestoRestante(0);
 
         const melhor = melhorPredicaoGestoRef.current;
-        const gestoEstavel = !usarCameraNativa || melhor.contagem >= 2;
-        if (melhor.rotulo && melhor.conf >= 0.42 && gestoEstavel) {
+        if (melhor.rotulo && melhor.conf >= 0.42) {
           adicionarAoTexto(melhor.rotulo);
           setLetraAtual(melhor.rotulo);
           setConfianca(Math.round(melhor.conf * 100));
@@ -1051,21 +675,16 @@ function AplicativoPrincipal() {
   }
 
   function alternarCamera() {
-    if (trocandoCameraRef.current) {
-      return;
-    }
-
+    if (trocandoCameraRef.current) return;
     trocandoCameraRef.current = true;
-    quadroPendenteRef.current = null;
-    setPontosMao([]);
-    setPontosMaos([]);
+    setCameraPronta(false);
     limparHistoricoPredicao();
     setTipoCamera((atual) => (atual === 'front' ? 'back' : 'front'));
 
-    setTimeout(() => {
+    if (timerCameraRef.current) clearTimeout(timerCameraRef.current);
+    timerCameraRef.current = setTimeout(() => {
       trocandoCameraRef.current = false;
-      agendarProximoQuadro();
-    }, 600);
+    }, 400);
   }
 
   function limparTexto() {
@@ -1094,7 +713,7 @@ function AplicativoPrincipal() {
       <SafeAreaView style={estilos.telaCheia}>
         <View style={estilos.centralizado}>
           <Text style={estilos.titulo}>Permissao da Camera</Text>
-          <Text style={estilos.descricao}>Precisamos de acesso a camera para traduzir os sinais de Libras.</Text>
+          <Text style={estilos.descricao}>O aplicativo precisa de acesso a camera para reconhecer Libras.</Text>
           <TouchableOpacity style={estilos.botao} onPress={pedirPermissao}>
             <Text style={estilos.textoBotao}>Permitir Acesso</Text>
           </TouchableOpacity>
@@ -1108,47 +727,19 @@ function AplicativoPrincipal() {
       <ScrollView contentContainerStyle={estilos.conteudoScroll}>
         <View style={estilos.cabecalho}>
           <Text style={estilos.titulo}>Tradutor de Libras</Text>
-          {!usarCameraNativa && (
-            <View style={estilos.linhaConfiguracao}>
-              <Text style={estilos.rotulo}>IP do Servidor:</Text>
-              <TextInput
-                style={estilos.campoTexto}
-                value={ipServidor}
-                onChangeText={setIpServidor}
-                placeholder="192.168.0.XX"
-                autoCapitalize="none"
-              />
-              <TouchableOpacity style={estilos.botaoPequeno} onPress={conectarSocket}>
-                <Text style={estilos.textoBotaoPequeno}>Conectar</Text>
-              </TouchableOpacity>
-            </View>
-          )}
           <View style={estilos.linhaStatus}>
-            <Text style={estilos.rotuloStatus}>Status: {statusConexao}</Text>
+            <Text style={estilos.rotuloStatus}>Modo: Local Offline</Text>
             <Text style={estilos.rotuloStatus}>Buffer: {quadrosBuffer}/9 quadros</Text>
           </View>
           <View style={estilos.linhaStatus}>
-            <Text style={estilos.rotuloStatus}>
-              {usarCameraNativa ? `Inferencia local: ${latencia} ms` : `Latencia: ${latencia} ms`}
-            </Text>
-            {!usarCameraNativa && <Text style={estilos.rotuloStatus}>Servidor: {latenciaServidor} ms</Text>}
+            <Text style={estilos.rotuloStatus}>Inferencia: {tempoInferencia} ms</Text>
+            <Text style={estilos.rotuloStatus}>Camera: {cameraPronta ? (tipoCamera === 'front' ? 'Frontal' : 'Traseira') : 'Iniciando...'}</Text>
           </View>
         </View>
 
-        <View
-          style={estilos.areaCamera}
-          onLayout={(evento) => {
-            const { width, height } = evento.nativeEvent.layout;
-            setDimensoesVista((atual) => (
-              atual.largura === width && atual.altura === height
-                ? atual
-                : { largura: width, altura: height }
-            ));
-          }}
-        >
-          {usarCameraNativa ? (
+        <View style={estilos.areaCamera}>
+          {LibrasNativeCamera ? (
             <LibrasNativeCamera
-              key={tipoCamera}
               style={estilos.camera}
               active={permissao.granted}
               tracking={permissao.granted}
@@ -1158,64 +749,17 @@ function AplicativoPrincipal() {
                 trocandoCameraRef.current = false;
               }}
               onCameraError={(evento) => {
-                const mensagem = evento?.nativeEvent?.message || 'Falha na camera local';
-                setStatusConexao(`Camera: ${mensagem}`);
+                const msg = evento?.nativeEvent?.message || 'Falha na camera local';
+                setLetraAtual(`Erro camera: ${msg}`);
               }}
               onLandmarks={receberQuadroLocal}
             />
           ) : (
-            <CameraView
-              ref={cameraRef}
-              style={estilos.camera}
-              facing={tipoCamera}
-              ratio="4:3"
-              animateShutter={false}
-              flash="off"
-              mute={true}
-              onCameraReady={() => {
-                setCameraPronta(true);
-                cameraRef.current?.getAvailablePictureSizesAsync()
-                  .then((tamanhos) => {
-                    const resolucoes = tamanhos
-                      .map((tamanho) => {
-                        const [largura, altura] = tamanho.split('x').map(Number);
-                        const maior = Math.max(largura, altura);
-                        const menor = Math.min(largura, altura);
-                        return {
-                          tamanho,
-                          largura,
-                          altura,
-                          maior,
-                          menor,
-                          area: largura * altura,
-                          quatroPorTres: Math.abs(maior / menor - 4 / 3) < 0.06,
-                        };
-                      })
-                      .filter((item) => item.largura && item.altura)
-                      .sort((a, b) => a.area - b.area);
-                    const recomendada = resolucoes.find((item) => item.quatroPorTres && item.maior >= 320 && item.maior <= 480)
-                      || resolucoes.find((item) => item.quatroPorTres && item.maior >= 320 && item.maior <= 640)
-                      || resolucoes.find((item) => item.maior >= 320 && item.maior <= 480)
-                      || resolucoes.find((item) => item.maior >= 320 && item.maior <= 640)
-                      || resolucoes[0];
-                    if (recomendada) setTamanhoFoto(recomendada.tamanho);
-                  })
-                  .catch(() => {});
-              }}
-              pictureSize={tamanhoFoto}
-              onMountError={() => {
-                setCameraPronta(false);
-                trocandoCameraRef.current = false;
-              }}
-            />
+            <View style={estilos.centralizado}>
+              <Text style={estilos.textoPadrao}>Modulo de camera nativo indisponivel.</Text>
+            </View>
           )}
-          <RastreamentoMao
-            pontosMao={pontosMao}
-            pontosMaos={pontosMaos}
-            espelhado={tipoCamera === 'front'}
-            dimensoesVista={dimensoesVista}
-            tamanhoQuadro={tamanhoQuadro}
-          />
+
           <TouchableOpacity
             style={estilos.etiquetaCamera}
             onPress={alternarCamera}
@@ -1234,7 +778,7 @@ function AplicativoPrincipal() {
           <View style={estilos.caixaPrevisao}>
             <Text style={estilos.rotuloPainel}>Sinal Detectado:</Text>
             <Text style={estilos.valorPrevisao}>{letraAtual}</Text>
-            <Text style={estilos.valorConfianca}>Confianca: {confianca}%</Text>
+            <Text style={estilos.valorConfianca}>Confianca: {confianca}% | Tempo: {tempoInferencia} ms</Text>
           </View>
 
           <View style={estilos.caixaTexto}>
@@ -1346,7 +890,7 @@ const estilos = StyleSheet.create({
     fontSize: 20,
     fontWeight: 'bold',
     color: '#111827',
-    marginBottom: 10,
+    marginBottom: 8,
     textAlign: 'center',
   },
   descricao: {
@@ -1354,26 +898,6 @@ const estilos = StyleSheet.create({
     color: '#4B5563',
     textAlign: 'center',
     marginBottom: 16,
-  },
-  linhaConfiguracao: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  rotulo: {
-    fontSize: 13,
-    color: '#374151',
-    marginRight: 6,
-  },
-  campoTexto: {
-    flex: 1,
-    height: 36,
-    borderWidth: 1,
-    borderColor: '#D1D5DB',
-    borderRadius: 6,
-    paddingHorizontal: 8,
-    backgroundColor: '#FFFFFF',
-    fontSize: 13,
   },
   linhaStatus: {
     flexDirection: 'row',
@@ -1392,7 +916,7 @@ const estilos = StyleSheet.create({
     overflow: 'hidden',
     borderWidth: 1,
     borderColor: '#D1D5DB',
-    backgroundColor: '#E5E7EB',
+    backgroundColor: '#F3F4F6',
     marginBottom: 12,
   },
   camera: {
@@ -1503,17 +1027,6 @@ const estilos = StyleSheet.create({
     color: '#374151',
     fontSize: 14,
     fontWeight: '500',
-  },
-  botaoPequeno: {
-    backgroundColor: '#374151',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 6,
-    marginLeft: 6,
-  },
-  textoBotaoPequeno: {
-    color: '#FFFFFF',
-    fontSize: 12,
   },
   textoPadrao: {
     fontSize: 14,

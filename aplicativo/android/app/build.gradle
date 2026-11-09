@@ -98,10 +98,15 @@ android {
         externalNativeBuild {
             cmake {
                 // CMake hashes long object paths to stay below Windows/Ninja MAX_PATH.
-                arguments "-DCMAKE_OBJECT_PATH_MAX=128"
+                arguments "-DCMAKE_OBJECT_PATH_MAX=250"
             }
         }
         buildConfigField "String", "REACT_NATIVE_RELEASE_LEVEL", "\"${findProperty('reactNativeReleaseLevel') ?: 'stable'}\""
+    }
+    externalNativeBuild {
+        cmake {
+            buildStagingDirectory = file("C:/tmp/cxx")
+        }
     }
     signingConfigs {
         debug {
@@ -135,6 +140,7 @@ android {
     }
     androidResources {
         ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:!CVS:!thumbs.db:!picasa.ini:!*~'
+        noCompress 'task', 'tflite'
     }
 }
 
