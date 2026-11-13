@@ -1,164 +1,188 @@
-# Documentacao do Projeto: Tradutor de Libras em Tempo Real (Libras2Text)
+# Libras2Text
 
-Este projeto consiste em um sistema completo para traducao de sinais da Lingua Brasileira de Sinais (Libras) capturados pela camera do celular para texto em tempo real. A solucao utiliza uma arquitetura cliente-servidor de baixa latencia, baseada em Expo Go (React Native) no aplicativo movel e FastAPI com MediaPipe e Scikit-Learn no servidor backend.
-
----
-
-## 1. Visao Geral da Arquitetura
-
-O sistema opera de forma assincrona e distribuida atraves de comunicacao bidirecional via WebSocket:
-
-1. **Captura no Celular (Frontend)**: O app Expo Go acessa a camera do dispositivo, captura quadros otimizados em intervalos controlados (throttle a cada 400 ms) em formato Base64 e os envia para o servidor via WebSocket.
-2. **Processamento e Decodificacao (Backend)**: O servidor FastAPI recebe os dados em Base64, decodifica para matrizes NumPy e converte para o espaco de cor adequado atraves do OpenCV.
-3. **Extracao de Marcos da Cabeca, Bracos e Maos (MediaPipe)**: O modulo de visao computacional extrai as coordenadas espaciais 3D (x, y, z) de 34 pontos anatomicos atraves da execucao simultanea de `PoseLandmarker` (cabeca, ombros, cotovelos e pulsos) e `HandLandmarker` (21 pontos dos dedos).
-4. **Normalizacao Matematica**: Os pontos sao transladados em relacao ao centro dos ombros (ou pulso) e escalados pela distancia euclidiana maxima, tornando o reconhecimento invariante a distancia da camera e enquadramento.
-5. **Inferencia de Machine Learning**: O classificador treinado com Scikit-Learn e carregado na memoria no ciclo de vida da aplicacao e realiza a predicao do sinal ou palavra em menos de 15 ms por quadro.
-6. **Retorno ao Cliente**: O servidor responde com o caractere detectado, a confianca da previsao e a latencia do processamento, atualizando a interface do usuario instantaneamente.
+Aplicativo mobile em React Native para traducao em tempo real da Lingua Brasileira de Sinais (Libras) para texto, com rastreamento das maos via MediaPipe e classificacao por Random Forest diretamente no celular (100% offline).
 
 ---
 
-## 2. Estrutura de Diretorios do Projeto
+## 1. Visao Geral
 
-```
+O Libras2Text executa todo o processamento no proprio aparelho Android:
+1. **Captura e rastreamento nativo**: a camera utiliza CameraX em resolucao otimizada (240x320 com rotacao em C++) integrada ao MediaPipe Tasks Vision (`marcador_maos.task` em `RunningMode.VIDEO` com aceleracao GPU e `marcador_pose.task` em thread separada), detectando 21 pontos anatomicos de cada mao em tempo real.
+2. **Line tracing**: uma `View` nativa Android (`Canvas` acelerado por hardware) desenha os pontos e as ligacoes dos dedos diretamente sobre a imagem da camera sem passar pela ponte JavaScript, com escala e espelhamento ajustados conforme a camera frontal ou traseira.
+3. **Extracao de caracteristicas**: calcula um vetor de 110 caracteristicas (coordenadas relativas ao pulso, metricas geometricas, pontos de articulacao, interacao bimanual e derivadas temporais).
+4. **Classificacao local**: as 75 arvores do modelo Random Forest estao embarcadas em JSON (`modelo_libras_mobile.json`) e sao percorridas pelo JavaScript em menos de 1 ms, sem necessidade de internet ou servidor externo.
+
+---
+
+## 2. Estrutura do Projeto
+
+```text
 Libras2Text/
-├── DOCUMENTACAO.md                     # Documento detalhado com toda a explicacao do projeto
-├── servidor/                           # Modulo do Backend e Servicos de Visao Computacional
-│   ├── principal.py                    # Servidor FastAPI com endpoints WebSocket e HTTP
-│   ├── extrator_pontos.py              # Extracao dos 21 marcos e normalizacao euclidiana
-│   ├── processador_imagem.py           # Decodificacao de imagens em formato Base64
-│   ├── classificador_libras.py         # Carregamento do modelo serializado e inferencia
-│   ├── gerenciador_conexoes.py         # Gerenciamento persistente das conexoes WebSocket
-│   ├── requisitos.txt                  # Dependencias Python do servidor
-│   └── modelos_ia/                     # Arquivos de modelos serializados
-│       ├── marcador_maos.task          # Modelo neural do MediaPipe HandLandmarker
-│       ├── modelo_libras.joblib        # Classificador Random Forest treinado
-│       └── rotulos.joblib              # Lista de classes e caracteres reconhecidos
-├── modelo/                             # Modulo de Treinamento e Criacao do Dataset
-│   ├── gerar_dataset_inicial.py        # Gerador sintese de configuracoes geometricas de Libras
-│   ├── coletar_dados.py                # Script interativo para gravacao de novos sinais via webcam
-│   ├── treinar_modelo.py               # Treinamento do modelo, avaliacao e exportacao joblib
-│   └── dataset_libras.csv              # Dataset com as amostras de coordenadas normalizadas
-└── aplicativo/                         # Frontend React Native utilizando Expo Go
-    ├── App.js                          # Componente principal da aplicacao movel
-    ├── app.json                        # Configuracoes do projeto Expo e permissoes de camera
-    ├── package.json                    # Dependencias do ecossistema JavaScript/Node
-    └── assets/                         # Icones e recursos visuais do aplicativo
+├── Libras2Text.apk                             # APK de producao pronto para instalar
+├── README.md                                   # Documentacao do projeto
+├── aplicativo/                                 # Codigo do app React Native (Expo SDK 58)
+│   ├── App.js                                  # Interface, extracao de caracteristicas e inferencia local
+│   ├── index.js                                # Ponto de entrada
+│   ├── app.json                                # Configuracoes e permissoes do aplicativo
+│   ├── package.json                            # Dependencias do projeto
+│   ├── assets/
+│   │   └── modelo_libras_mobile.json           # Modelo Random Forest exportado para o app
+│   ├── modules/libras-native/                  # Modulo nativo Android (CameraX + MediaPipe)
+│   │   ├── expo-module.config.json             # Registro do modulo no Expo
+│   │   ├── src/index.js                        # Exportacao do componente de camera nativa
+│   │   └── android/
+│   │       ├── build.gradle                    # Dependencias CameraX e MediaPipe
+│   │       └── src/main/
+│   │           ├── assets/
+│   │           │   ├── marcador_maos.task      # Modelo MediaPipe HandLandmarker
+│   │           │   └── marcador_pose.task      # Modelo MediaPipe PoseLandmarker
+│   │           └── java/expo/modules/librasnative/
+│   │               ├── LibrasNativeModule.kt       # Ponte de eventos e propriedades da view
+│   │               └── LibrasNativeCameraView.kt   # Captura CameraX e deteccao MediaPipe
+│   └── android/                                # Projeto nativo Android para build do APK
+├── modelo/                                     # Scripts de treino e dataset
+│   ├── dataset_libras.csv                      # Base de dados com 110 caracteristicas
+│   ├── gerar_dataset_inicial.py                # Gerador com moldes baseados no INES e literatura
+│   ├── coletar_dados.py                        # Coleta de amostras pela webcam
+│   ├── treinar_modelo.py                       # Treinamento do classificador Random Forest
+│   └── exportar_modelo_mobile.py               # Conversor do modelo scikit-learn para JSON
+└── servidor/                                   # Servidor opcional Python (FastAPI + WebSocket)
+    ├── principal.py                            # Backend para testes em computador
+    ├── extrator_pontos.py                      # Extracao de pontos no servidor
+    ├── processador_imagem.py                   # Processamento de imagem
+    ├── classificador_libras.py                 # Classificador joblib
+    └── requisitos.txt                          # Dependencias do servidor
 ```
 
 ---
 
-## 3. Detalhamento Tecnico dos Componentes
+## 3. Vocabulário do Reconhecedor
 
-### 3.1 Servidor Backend (`servidor/`)
+O modelo embarcado reconhece **46 classes** no total: as **26 letras do alfabeto manual (A–Z)** e **20 sinais de uso cotidiano** em Libras, treinados com base nas referências oficiais do INES e no Dicionário de Libras Ilustrado (SAT/FADERS).
 
-- **`principal.py`**:
-  - Implementa o gerenciador de ciclo de vida (`lifespan`) do FastAPI, carregando o modelo do classificador e o detector do MediaPipe na memoria RAM durante a inicializacao.
-  - Disponibiliza o endpoint WebSocket `/ws` para transmissao continua de frames e desconexao limpa via `WebSocketDisconnect`.
-  - Fornece um endpoint HTTP `/traduzir-frame` via POST multipart para testes pontuais de imagens.
-  - Implementa politicas de CORS liberando acesso da rede local.
+Para refinar ou adicionar amostras reais de câmera a qualquer classe, execute `python modelo/coletar_dados.py`, informe o rótulo desejado e grave cerca de 30 exemplos. Depois execute `python modelo/treinar_modelo.py`; as amostras reais substituem os dados-base da mesma classe e o exportador atualiza automaticamente `aplicativo/assets/modelo_libras_mobile.json`.
 
-- **`extrator_pontos.py`**:
-  - Integra simultaneamente o `PoseLandmarker` e o `HandLandmarker` da API de tarefas do MediaPipe.
-  - Garante o download automatico dos modelos neurais (`marcador_maos.task` e `marcador_pose.task`).
-  - Extrai 34 marcos espaciais (102 dimensoes):
-    1. **Cabeca (7 marcos da pose)**: nariz, olhos, orelhas e extremidades da boca, capturando inclinacao, movimentos afirmativos/negativos e expressoes nao-manuais (ENM).
-    2. **Bracos e Tronco (6 marcos da pose)**: ombros, cotovelos e pulsos, capturando o ponto de articulacao e alcance dos bracos.
-    3. **Mao (21 marcos da mao)**: articulacoes e pontas de todos os dedos, identificando a configuracao de mao (CM).
-  - Aplica normalizacao euclidiana relativa ao centro dos ombros (ou pulso) e escala maxima, tornando o reconhecimento invariante a distancia e tamanho corporal.
+### Alfabeto Manual Completo (26 letras: A–Z)
+- **A**: mao fechada com polegar estendido ao lado do indicador.
+- **B**: quatro dedos estendidos para cima e polegar dobrado na palma.
+- **C**: dedos curvados em formato de arco de C.
+- **D**: indicador estendido e ponta do polegar tocando o medio curvado.
+- **E**: dedos flexionados na parte superior com polegar recolhido.
+- **F**: indicador dobrado para frente com polegar apoiado na lateral externa e demais dedos estendidos.
+- **G**: indicador estendido para cima com polegar paralelo encostado na lateral do indicador.
+- **H**: indicador e medio estendidos com polegar entre eles, executando giro do punho.
+- **I**: dedo minimo estendido para cima e os outros fechados.
+- **J**: mao em configuracao I desenhando o arco em gancho da letra J no ar.
+- **K**: indicador para cima, medio semi-inclinado para frente e polegar entre eles com impulso vertical para cima.
+- **L**: indicador para cima e polegar aberto formando angulo reto.
+- **M**: indicador, medio e anelar estendidos e unidos apontando para baixo.
+- **N**: indicador e medio estendidos e unidos apontando para baixo.
+- **O**: pontas dos dedos unidas com a ponta do polegar em circulo.
+- **P**: configuracao de K orientada horizontalmente, estatica.
+- **Q**: configuracao de G invertida apontando para baixo, estatica.
+- **R**: indicador e medio estendidos para cima e cruzados.
+- **S**: mao fechada em punho com polegar cruzado sobre a frente dos dedos, estatica.
+- **T**: indicador dobrado sobre o polegar (posicionado entre indicador e medio) e demais dedos fechados.
+- **U**: indicador e medio estendidos juntos para cima.
+- **V**: indicador e medio estendidos e afastados em formato de V.
+- **W**: indicador, medio e anelar estendidos e separados.
+- **X**: indicador dobrado em formato de gancho com movimento curto de tracao.
+- **Y**: polegar e minimo estendidos, demais dedos fechados.
+- **Z**: indicador estendido desenhando o zigue-zague da letra Z no ar.
 
-- **`processador_imagem.py`**:
-  - Processa a string Base64 recebida, remove eventuais cabecalhos MIME (`data:image/jpeg;base64,`) e decodifica os bytes em array NumPy via `cv2.imdecode`.
-
-- **`classificador_libras.py`**:
-  - Carrega `modelo_libras.joblib` e a lista correspondente de rotulos em `rotulos.joblib`.
-  - Executa inferencia atraves de `modelo.predict()` e extrai a probabilidade com `modelo.predict_proba()`.
-  - Retorna o resultado com o sinal ou palavra prevista e o indice de confianca numerico.
-
-- **`gerenciador_conexoes.py`**:
-  - Mantem o registro das conexoes WebSocket ativas e realiza o envio seguro de mensagens em formato JSON.
-
-### 3.2 Modulo de Inteligencia Artificial (`modelo/`)
-
-- **`gerar_dataset_inicial.py`**:
-  - Modela as posicoes anatomicas dos cinco dedos, dos bracos e a inclinacao da cabeca para sinais completos de Libras ("OI", "BOM DIA", "OBRIGADO", "POR FAVOR", "SIM", "NAO", "EU", "VOCE", "CASA", "AJUDA") e configuracoes basicas do alfabeto ("A", "B", "C", "L", "V").
-  - Gera amostras com 102 caracteristicas geometricas normalizadas com variacoes gaussianas.
-  - Salva os dados no arquivo `dataset_libras.csv`.
-
-- **`coletar_dados.py`**:
-  - Permite ao desenvolvedor/aluno usar a webcam do computador para gravar amostras reais de sinais capturando cabeca, bracos e maos ao pressionar a barra de espaco.
-
-- **`treinar_modelo.py`**:
-  - Carrega `dataset_libras.csv`, divide os dados em 80% treino e 20% teste com amostragem estratificada.
-  - Treina um classificador `RandomForestClassifier` com 100 estimadores.
-  - Exibe relatorio de classificacao com precisao, revocacao e F1-Score.
-  - Salva os artefatos `modelo_libras.joblib` e `rotulos.joblib` diretamente na pasta `servidor/modelos_ia/`.
-
-### 3.3 Aplicativo Movel (`aplicativo/`)
-
-- **Fluxo de Permissoes**: Utiliza o hook `useCameraPermissions()` do `expo-camera` para verificar e solicitar acesso a camera do dispositivo de forma clara.
-- **Amostragem Temporal Rapida (180 ms)**: Taxa de amostragem reduzida para 180 ms (~5.5 quadros por segundo), fornecendo densidade suficiente de amostras para capturar a trajetoria de gestos que exigem mais tempo.
-- **Buffer Deslizante Temporal (10 Quadros)**: O servidor mantem uma fila deslizante dos ultimos 10 quadros recebidos (~1.8 segundos de movimento), calculando o vetor de deslocamento espacial de inicio a fim do gesto (204 dimensoes: 102 de marcos atuais + 102 de trajetoria).
-- **Modo "Gravar Gesto Longo (2.5s)"**: Botao dedicado com contagem regressiva previa de 3 segundos para preparacao e posicionamento do usuario (`Prepare-se em 3s... 2s... 1s...`), seguido por 2.5 segundos de gravacao continua da trajetoria do sinal, adicionando a palavra traduzida diretamente ao texto final.
-- **Captura Continua sem Piscadas**: A propriedade `animateShutter={false}` no `CameraView` e `shutterSound: false` na captura desativam a animacao nativa de obturador e o som de disparo, garantindo que o visor permaneca estavel e sem nenhum piscar de tela durante a traducao em tempo real.
-- **Otimizacao de Imagem**: Captura os quadros com qualidade controlada (`quality: 0.3`) e obtencao direta em Base64, evitando processamentos desnecessarios no dispositivo.
-- **Limpeza de Cache**: O arquivo temporario criado pelo metodo de foto e removido em seguida com `FileSystem.deleteAsync` para evitar ocupacao indevida de espaco em disco no celular.
-- **Cliente WebSocket**: Conecta via `new WebSocket(url)` com reconexao automatica, exibindo o status atual (Conectado, Conectando, Desconectado ou Erro) e contador de quadros no buffer (`Buffer: X/10`).
-- **Alternancia Segura de Camera (Frontal e Traseira)**: Permite alternar entre a camera frontal e traseira atraves do botao de acao ou da etiqueta visual. O ciclo de vida do sensor e gerenciado com o evento `onCameraReady`, bloqueando temporariamente novos disparos de fotos durante a mudanca do hardware para prevenir travamentos nos drivers nativos da camera.
-- **Design Minimalista**: Interface construida com tons de branco (`#FFFFFF`, `#F8F9FA`), bordas sutis e tipografia escura, sem icones ou cores vibrantes desnecessarias.
+### Palavras e Expressoes do Dia a Dia (20 sinais)
+- **OI**: mao partindo de configuracao O e abrindo o minimo em I com movimento.
+- **TCHAU**: mao aberta (configuracao 5) elevada acenando lateralmente.
+- **TUDO BEM**: mao partindo da boca em BOM e finalizando em joinha (polegar estendido para cima).
+- **BOM**: mao fechada em O diante da boca abrindo em palma aberta para frente.
+- **BOM DIA**: sinal de BOM seguido da configuracao D/DIA deslocando para o lado.
+- **OBRIGADO**: mao em B tocando a testa e descendo para frente.
+- **POR FAVOR**: maos em B na altura do peito, deslizando na frente uma da outra.
+- **DESCULPA**: mao em Y tocando o queixo com movimento curto.
+- **SIM**: mao em S flexionando o punho verticalmente para baixo.
+- **NAO**: indicador oscilando lateralmente ou mao em Y balancando.
+- **EU**: indicador apontando para o centro do peito.
+- **VOCE**: indicador apontando para frente na direcao da camera.
+- **CASA**: duas maos em B inclinadas tocando as pontas dos dedos em telhado.
+- **AJUDA**: mao dominante em B/A impulsionada para frente com apoio da outra mao.
+- **AGUA**: mao em L com polegar no queixo e indicador flexionando repetidamente.
+- **COMER**: dedos curvados abrindo e fechando em direcao a boca.
+- **QUERER**: mao em garra voltada para cima na altura do peito puxando para perto do corpo.
+- **ONDE**: maos abertas na altura do tronco oscilando lateralmente.
+- **NOME**: mao em U horizontal na altura do peito movendo-se lateralmente.
+- **POR QUE**: indicadores estendidos na altura do peito em movimento vertical alternado/descendente.
 
 ---
 
-## 4. Guia de Instalacao e Execucao
+## 4. Vetor de 110 Caracteristicas
 
-### 4.1 Instalacao das Dependencias do Servidor
+Para garantir a mesma representacao numerica no app e no treino:
+1. **63 coordenadas centradas no pulso**: coordenadas dos 21 marcos da mao normalizadas pelo comprimento medio dos metacarpos e espelhadas horizontalmente pelo determinante da palma, tornando a extracao equivalente para mao esquerda e direita.
+2. **25 medidas geometricas**: distancias das pontas dos dedos ao pulso, curvatura das articulacoes por produto escalar, distancias entre dedos adjacentes e pinças com o polegar.
+3. **4 medidas de articulacao corporal**: altura do pulso e indicador em relacao ao nariz e largura dos ombros (via PoseLandmarker), com valores de fallback caso o tronco nao esteja visivel.
+4. **6 metricas bimanuais**: indicador de presenca da segunda mao, distancia entre pulsos, distancias entre pontas dos indicadores e medios, diferenca de altura e cosseno entre as palmas.
+5. **12 metricas de movimento temporal**: janela de ate 1,1 s avaliando deslocamento liquido, amplitude maxima, energias acumuladas dos marcos de referencia e variacao de abertura dos dedos.
 
-No terminal, certifique-se de que o Python esteja instalado e execute:
+---
 
-```bash
-pip install -r servidor/requisitos.txt
-```
+## 5. Como Instalar e Testar o APK
 
-### 4.2 Treinamento do Modelo de IA
+O arquivo compilado pronto para uso esta na raiz:
+- `Libras2Text.apk`
 
-Para treinar o modelo com os dados de base e gerar os arquivos serializados:
+### Instalacao no celular
+1. Conecte o celular Android ao computador via cabo USB ou transfira o APK por Bluetooth / Google Drive.
+2. Caso utilize o cabo e tenha o `adb` instalado:
+   ```bash
+   adb install -r Libras2Text.apk
+   ```
+3. No celular, abra o aplicativo e conceda a permissao de uso da camera quando solicitada.
+4. Aponte a camera frontal ou traseira para a sua mao. As linhas do rastreamento aparecerao sobrepostas aos dedos e o sinal sera traduzido na tela com a confianca e o tempo de inferencia em milissegundos.
 
-```bash
-python modelo/treinar_modelo.py
-```
+---
 
-### 4.3 Inicializacao do Servidor FastAPI
+## 6. Como Compilar um Novo APK
 
-Para iniciar o servidor FastAPI e escutar em todas as interfaces da rede local (porta 8000):
+Caso faca alteracoes no codigo do aplicativo ou no modelo:
 
-```bash
-cd servidor
-python -m uvicorn principal:app --host 0.0.0.0 --port 8000 --reload
-```
+### Pre-requisitos
+- **Node.js 18+** e `npm`
+- **JDK 17** instalado
+- **Android SDK** configurado (variavel `ANDROID_HOME` ou arquivo `aplicativo/android/local.properties` com `sdk.dir`)
 
-Ou execute diretamente:
+### Passos de compilacao
+1. Instalar as dependencias do JavaScript:
+   ```bash
+   cd aplicativo
+   npm install
+   ```
 
-```bash
-python servidor/principal.py
-```
+2. Compilar o APK de release usando o Gradle:
+   ```bash
+   cd android
+   .\gradlew assembleRelease
+   ```
 
-### 4.4 Configuracao da Rede e Firewall
+3. O APK gerado ficara em:
+   `aplicativo/android/app/build/outputs/apk/release/app-release.apk`
 
-1. Descubra o IP local do computador executando `ipconfig` (no Windows) ou `ifconfig`/`ip addr` (no Linux/Mac). Geralmente algo como `192.168.0.XX`.
-2. Certifique-se de que o computador e o celular estao conectados na mesma rede Wi-Fi.
-3. Se necessario, permita o trafego da porta 8000 no Firewall do Windows:
-   - Abra o *Firewall do Windows com Seguranca Avancada*.
-   - Crie uma *Regra de Entrada* para a porta TCP `8000`.
+4. Para copiar para a raiz do repositorio (estando em `aplicativo/android`):
+   ```bash
+   copy app\build\outputs\apk\release\app-release.apk ..\..\Libras2Text.apk
+   ```
 
-### 4.5 Execucao do Aplicativo Expo Go
+---
 
-No terminal, acesse a pasta do aplicativo e inicie o Expo:
+## 7. Funcionamento da Interface
 
-```bash
-cd aplicativo
-npx expo start
-```
-
-1. Abra o app **Expo Go** no celular.
-2. Escaneie o QR Code exibido no terminal.
-3. No campo "IP do Servidor" no topo do aplicativo, digite o IP local do seu computador (exemplo: `192.168.0.12`) e toque em **Conectar**.
-4. Toque em **Iniciar Traducao** e posicione a mao em frente a camera.
+- **Cabecalho**: exibe o status de operacao ("Modo: Local Offline"), a contagem do buffer temporal (ate 9 quadros), o tempo total de inferencia em ms e a camera ativa.
+- **Area de Video**: visualizacao da camera em formato 3:4 com o line tracing em `Canvas` nativo desenhado diretamente sobre as maos.
+- **Painel de Traducao**: mostra o sinal reconhecido em destaque, o percentual de confianca e o texto acumulado.
+- **Botoes de Acao**:
+  - `Gravar Gesto Longo (2.5s)`: contagem regressiva de 3 s e captura focada de 2,5 s para sinais com movimento.
+  - `Iniciar / Pausar Traducao Continua`: liga ou pausa a classificacao frame a frame.
+  - `+ Frase`: insere manualmente o sinal atual no texto traduzido.
+  - `Espaco`: adiciona espaco entre palavras.
+  - `Apagar`: apaga o ultimo termo inserido.
+  - `Limpar`: limpa todo o texto acumulado.
+  - `Trocar Camera`: alterna entre camera frontal e traseira.

@@ -6,3 +6,16 @@ node_modules/
 .expo/
 dist/
 web-build/
+*.apk
+aplicativo/android/.gradle/
+aplicativo/android/build/
+aplicativo/android/app/build/
+aplicativo/android/app/debug.keystore
+!aplicativo/modules/libras-native/android/src/main/assets/*.task
+
+aplicativo/modules/libras-native/android/.gradle/
+aplicativo/modules/libras-native/android/build/
+Libras2Text.apk
+.obsidian/
+venv/
+.ven

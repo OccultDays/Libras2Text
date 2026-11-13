@@ -1,0 +1,56 @@
+// Top-level build file where you can add configuration options common to all sub-projects/modules.
+
+buildscript {
+  repositories {
+    google()
+    mavenCentral()
+  }
+  dependencies {
+    classpath('com.android.tools.build:gradle')
+    classpath('com.facebook.react:react-native-gradle-plugin')
+    def kotlinVersion = findProperty('android.kotlinVersion')
+    classpath(kotlinVersion ? "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlinVersion" : 'org.jetbrains.kotlin:kotlin-gradle-plugin')
+  }
+}
+
+allprojects {
+  repositories {
+    google()
+    mavenCentral()
+    maven { url 'https://www.jitpack.io' }
+  }
+  if (project.path == ':expo-modules-core') {
+    project.plugins.withId('com.android.library') {
+      project.android.externalNativeBuild.cmake.buildStagingDirectory = new File('C:/tmp/cxx/expo-modules-core')
+    }
+  }
+  afterEvaluate { project ->
+    if (project.path == ':expo-modules-core') {
+      project.tasks.matching { it.name == 'unpackExpoModulesV2Cpp' }.configureEach {
+        outputs.upToDateWhen { false }
+        doLast {
+          def cppRoot = new File(project.buildDir, 'expo-modules-v2-cpp')
+          [new File(cppRoot, 'CMakeLists.txt'), new File(cppRoot, 'expo-jsi/CMakeLists.txt')].each { cmakeFile ->
+            if (cmakeFile.exists()) {
+              cmakeFile.text = cmakeFile.getText('UTF-8').replace(' CONFIGURE_DEPENDS', '')
+            }
+          }
+        }
+      }
+      project.tasks.matching { it.name.startsWith('configureCMakeRelWithDebInfo') || it.name.startsWith('configureCMakeDebug') }.configureEach {
+        outputs.upToDateWhen { false }
+        doLast {
+          def verifyRoot = new File('C:/tmp/cxx/expo-modules-core')
+          project.fileTree(verifyRoot).matching { include '**/CMakeFiles/VerifyGlobs.cmake' }.files.each { verifyFile ->
+            verifyFile.text = verifyFile.getText('UTF-8').replace('if(NOT "${NEW_GLOB}" STREQUAL "${OLD_GLOB}")', 'if(FALSE)')
+            def ninjaFile = new File(verifyFile.parentFile.parentFile, 'build.ninja')
+            if (ninjaFile.exists()) ninjaFile.setLastModified(System.currentTimeMillis() + 10000)
+          }
+        }
+      }
+    }
+  }
+}
+
+apply plugin: "expo-root-project"
+apply plugin: "com.facebook.react.rootproject"
