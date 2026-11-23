@@ -13,6 +13,87 @@ def _limitar(valor, minimo, maximo):
     return max(minimo, min(maximo, float(valor)))
 
 
+def filtrar_maos_ativas(pontos_maos_3d, largura_quadro=480, altura_quadro=640, pontos_pose=None):
+    if not pontos_maos_3d:
+        return []
+
+    maior_lado = float(max(largura_quadro, altura_quadro, 1))
+    escala_x = float(largura_quadro) / maior_lado
+    escala_y = float(altura_quadro) / maior_lado
+
+    pose_valida = False
+    nariz_y = 0.0
+    larg_ombros = 0.30
+    if pontos_pose is not None and len(pontos_pose) >= 9:
+        try:
+            ny = float(pontos_pose[0][1]) * escala_y
+            oex = float(pontos_pose[7][0]) * escala_x
+            oey = float(pontos_pose[7][1]) * escala_y
+            odx = float(pontos_pose[8][0]) * escala_x
+            ody = float(pontos_pose[8][1]) * escala_y
+            if all(math.isfinite(v) for v in (ny, oex, oey, odx, ody)):
+                nariz_y = ny
+                larg_ombros = max(math.hypot(oex - odx, oey - ody), 0.12)
+                pose_valida = True
+        except Exception:
+            pose_valida = False
+
+    candidatas = []
+    for mao in pontos_maos_3d:
+        if mao is None or len(mao) != 21:
+            continue
+        raw_y = float(mao[0][1])
+        pulso_x = float(mao[0][0]) * escala_x
+        pulso_y = raw_y * escala_y
+        ind_y = float(mao[8][1]) * escala_y
+        if not (math.isfinite(pulso_x) and math.isfinite(pulso_y) and math.isfinite(ind_y)):
+            continue
+
+        soma_palma = 0.0
+        for idx_base in (5, 9, 13, 17):
+            dx = float(mao[idx_base][0]) * escala_x - pulso_x
+            dy = float(mao[idx_base][1]) * escala_y - pulso_y
+            soma_palma += math.hypot(dx, dy)
+        escala_mao = (soma_palma / 4.0) / 0.45
+        if escala_mao < 0.02:
+            continue
+
+        if pose_valida:
+            py = _limitar((pulso_y - nariz_y) / larg_ombros, -2.0, 2.5)
+            iy = _limitar((ind_y - nariz_y) / larg_ombros, -2.0, 2.5)
+            if py >= 1.35 and iy >= 1.28 and raw_y >= 0.80:
+                continue
+        else:
+            py = _limitar((raw_y - 0.30) * 2.0, -2.0, 2.5)
+
+        candidatas.append({
+            "mao": mao,
+            "py": py,
+            "raw_y": raw_y,
+            "escala_mao": escala_mao,
+        })
+
+    if len(candidatas) <= 1:
+        return [c["mao"] for c in candidatas]
+
+    candidatas.sort(key=lambda item: item["raw_y"])
+    alta = candidatas[0]
+    baixa = candidatas[1]
+    dif_py = baixa["py"] - alta["py"]
+    dx_ind = (float(alta["mao"][8][0]) - float(baixa["mao"][8][0])) * escala_x
+    dy_ind = (float(alta["mao"][8][1]) - float(baixa["mao"][8][1])) * escala_y
+    dist_ind = math.hypot(dx_ind, dy_ind) / max(alta["escala_mao"], 0.05)
+
+    baixa_em_repouso = (
+        (baixa["py"] >= 1.22 and dif_py >= 0.45 and dist_ind >= 1.10)
+        or (dif_py >= 0.65 and dist_ind >= 1.30)
+        or (baixa["raw_y"] >= 0.84 and dif_py >= 0.25 and dist_ind >= 1.10)
+    )
+    if baixa_em_repouso:
+        return [alta["mao"]]
+    return [alta["mao"], baixa["mao"]]
+
+
 def calcular_vetor_quadro(pontos_mao_3d, largura_quadro=480, altura_quadro=640, pontos_pose=None, outra_mao_3d=None):
     if pontos_mao_3d is None or len(pontos_mao_3d) != 21:
         return None
@@ -203,11 +284,20 @@ def montar_vetor_temporal(historico):
     vetor_base = atual["vetor"].copy()
     n_hist = len(historico)
     if len(vetor_base) >= 98 and vetor_base[92] < 0.5 and n_hist >= 2:
+        recuperou = False
         for idx_ant in range(n_hist - 2, max(-1, n_hist - 4), -1):
             anterior = historico[idx_ant]
             if len(anterior["vetor"]) >= 98 and anterior["vetor"][92] > 0.5:
                 vetor_base[92:98] = anterior["vetor"][92:98]
+                recuperou = True
                 break
+        if not recuperou:
+            for idx_ant in range(n_hist - 4, -1, -1):
+                anterior = historico[idx_ant]
+                va = anterior["vetor"]
+                if len(va) >= 98 and va[92] > 0.5 and (va[94] <= 0.85 or va[93] <= 1.25):
+                    vetor_base[92:98] = va[92:98]
+                    break
 
     delta_dedos = (atual["vetor"][63:68] - primeiro["vetor"][63:68]).tolist()
     movimento = np.array(
@@ -367,8 +457,9 @@ class ExtratorPontos:
             pontos_brutos_maos.append(brutos_2d)
             pontos_maos_3d.append(brutos_3d)
 
-        for idx, brutos_3d in enumerate(pontos_maos_3d):
-            outra_3d = pontos_maos_3d[1 - idx] if len(pontos_maos_3d) == 2 else None
+        maos_ativas_3d = filtrar_maos_ativas(pontos_maos_3d, largura, altura, pontos_brutos_pose)
+        for idx, brutos_3d in enumerate(maos_ativas_3d):
+            outra_3d = maos_ativas_3d[1 - idx] if len(maos_ativas_3d) == 2 else None
             q = calcular_vetor_quadro(brutos_3d, largura, altura, pontos_brutos_pose, outra_3d)
             if q is not None:
                 quadros_maos.append(q)

@@ -2,6 +2,11 @@ import os
 import joblib
 import numpy as np
 
+MAPA_SUBCLASSES = {
+    "DIA_ROSTO": "DIA",
+    "DIA_SOL": "DIA",
+}
+
 
 class ClassificadorLibras:
     def __init__(self, caminho_modelo=None, caminho_rotulos=None):
@@ -78,24 +83,35 @@ class ClassificadorLibras:
                 acumulado += folhas_prob[no]
 
             probabilidades = acumulado / len(self._arvores_rapidas)
-            melhor_indice = int(np.argmax(probabilidades))
-            rotulo_final = self.classes[melhor_indice]
-            confianca = float(probabilidades[melhor_indice])
+            agrupadas = {}
+            for idx_c, nome_c in enumerate(self.classes):
+                exibicao = MAPA_SUBCLASSES.get(nome_c, nome_c)
+                agrupadas[exibicao] = agrupadas.get(exibicao, 0.0) + float(probabilidades[idx_c])
+            rotulo_final = max(agrupadas, key=agrupadas.get)
+            confianca = agrupadas[rotulo_final]
         else:
             amostra = np.asarray(vetor_caracteristicas, dtype=np.float64).reshape(1, -1)
             if hasattr(self.modelo, "predict_proba"):
                 probabilidades = self.modelo.predict_proba(amostra)[0]
-                melhor_indice = int(np.argmax(probabilidades))
-                predicao = self.modelo.classes_[melhor_indice]
-                confianca = float(probabilidades[melhor_indice])
+                agrupadas = {}
+                for idx_c, item in enumerate(self.modelo.classes_):
+                    nome_c = str(self.rotulos[item]) if (self.rotulos is not None and isinstance(item, (int, np.integer)) and 0 <= item < len(self.rotulos)) else str(item)
+                    exibicao = MAPA_SUBCLASSES.get(nome_c, nome_c)
+                    agrupadas[exibicao] = agrupadas.get(exibicao, 0.0) + float(probabilidades[idx_c])
+                rotulo_final = max(agrupadas, key=agrupadas.get)
+                confianca = agrupadas[rotulo_final]
             else:
                 predicao = self.modelo.predict(amostra)[0]
                 confianca = 1.0
+                rotulo_final = str(predicao)
+                if self.rotulos is not None and isinstance(predicao, (int, np.integer)):
+                    if 0 <= predicao < len(self.rotulos):
+                        rotulo_final = str(self.rotulos[predicao])
+                rotulo_final = MAPA_SUBCLASSES.get(rotulo_final, rotulo_final)
 
-            rotulo_final = str(predicao)
-            if self.rotulos is not None and isinstance(predicao, (int, np.integer)):
-                if 0 <= predicao < len(self.rotulos):
-                    rotulo_final = str(self.rotulos[predicao])
+        if rotulo_final == "NEUTRO":
+            rotulo_final = ""
+            confianca = 0.0
 
         confianca_arredondada = round(confianca, 2)
         return {

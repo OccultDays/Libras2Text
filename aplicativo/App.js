@@ -6,6 +6,11 @@ import LibrasNativeCamera from './modules/libras-native';
 import modeloLocal from './assets/modelo_libras_mobile.json';
 
 const JANELA_TEMPORAL_MS = 1100;
+const JANELA_COMPOSICAO_MS = 2800;
+const MAPA_SUBCLASSES = {
+  DIA_ROSTO: 'DIA',
+  DIA_SOL: 'DIA',
+};
 
 function limitar(valor, minimo, maximo) {
   return Math.max(minimo, Math.min(maximo, valor));
@@ -13,6 +18,87 @@ function limitar(valor, minimo, maximo) {
 
 function norma3d(a, b = [0, 0, 0]) {
   return Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+}
+
+function filtrarMaosAtivas(listaMaos3d, larguraQuadro = 480, alturaQuadro = 640, pontosPose = null) {
+  if (!Array.isArray(listaMaos3d) || listaMaos3d.length === 0) return [];
+
+  const maiorLado = Math.max(larguraQuadro || 480, alturaQuadro || 640, 1);
+  const escalaX = (larguraQuadro || 480) / maiorLado;
+  const escalaY = (alturaQuadro || 640) / maiorLado;
+
+  let poseValida = false;
+  let narizY = 0;
+  let largOmbros = 0.30;
+  if (Array.isArray(pontosPose) && pontosPose.length >= 9) {
+    const p0 = pontosPose[0];
+    const p7 = pontosPose[7];
+    const p8 = pontosPose[8];
+    if (Array.isArray(p0) && Array.isArray(p7) && Array.isArray(p8)) {
+      const ny = Number(p0[1]) * escalaY;
+      const oex = Number(p7[0]) * escalaX;
+      const oey = Number(p7[1]) * escalaY;
+      const odx = Number(p8[0]) * escalaX;
+      const ody = Number(p8[1]) * escalaY;
+      if (
+        Number.isFinite(ny) && Number.isFinite(oex) && Number.isFinite(oey) &&
+        Number.isFinite(odx) && Number.isFinite(ody)
+      ) {
+        narizY = ny;
+        largOmbros = Math.max(Math.hypot(oex - odx, oey - ody), 0.12);
+        poseValida = true;
+      }
+    }
+  }
+
+  const candidatas = [];
+  for (const mao of listaMaos3d) {
+    if (!Array.isArray(mao) || mao.length !== 21) continue;
+    const rawY = Number(mao[0][1]);
+    const pulsoX = Number(mao[0][0]) * escalaX;
+    const pulsoY = rawY * escalaY;
+    const indY = Number(mao[8][1]) * escalaY;
+    if (!Number.isFinite(pulsoX) || !Number.isFinite(pulsoY) || !Number.isFinite(indY)) continue;
+
+    let somaPalma = 0;
+    for (const idxBase of [5, 9, 13, 17]) {
+      const dx = Number(mao[idxBase][0]) * escalaX - pulsoX;
+      const dy = Number(mao[idxBase][1]) * escalaY - pulsoY;
+      somaPalma += Math.hypot(dx, dy);
+    }
+    const escalaMao = (somaPalma / 4.0) / 0.45;
+    if (escalaMao < 0.02) continue;
+
+    let py;
+    if (poseValida) {
+      py = limitar((pulsoY - narizY) / largOmbros, -2.0, 2.5);
+      const iy = limitar((indY - narizY) / largOmbros, -2.0, 2.5);
+      if (py >= 1.35 && iy >= 1.28 && rawY >= 0.80) continue;
+    } else {
+      py = limitar((rawY - 0.30) * 2.0, -2.0, 2.5);
+    }
+
+    candidatas.push({ mao, py, rawY, escalaMao });
+  }
+
+  if (candidatas.length <= 1) {
+    return candidatas.map((c) => c.mao);
+  }
+
+  candidatas.sort((a, b) => a.rawY - b.rawY);
+  const alta = candidatas[0];
+  const baixa = candidatas[1];
+  const difPy = baixa.py - alta.py;
+  const dxInd = (Number(alta.mao[8][0]) - Number(baixa.mao[8][0])) * escalaX;
+  const dyInd = (Number(alta.mao[8][1]) - Number(baixa.mao[8][1])) * escalaY;
+  const distInd = Math.hypot(dxInd, dyInd) / Math.max(alta.escalaMao, 0.05);
+
+  const baixaEmRepouso = (
+    (baixa.py >= 1.22 && difPy >= 0.45 && distInd >= 1.10) ||
+    (difPy >= 0.65 && distInd >= 1.30) ||
+    (baixa.rawY >= 0.84 && difPy >= 0.25 && distInd >= 1.10)
+  );
+  return baixaEmRepouso ? [alta.mao] : [alta.mao, baixa.mao];
 }
 
 function calcularVetorQuadro(pontosMao3d, larguraQuadro = 480, alturaQuadro = 640, pontosPose = null, outraMao3d = null) {
@@ -239,13 +325,26 @@ function montarVetorTemporal(historico) {
 
   const vetorBase = atual.vetor.slice();
   if (vetorBase.length >= 98 && vetorBase[92] < 0.5 && historico.length >= 2) {
+    let recuperou = false;
     const inicioBusca = Math.max(0, historico.length - 3);
     for (let i = historico.length - 2; i >= inicioBusca; i -= 1) {
       if (historico[i].vetor.length >= 98 && historico[i].vetor[92] > 0.5) {
         for (let k = 92; k < 98; k += 1) {
           vetorBase[k] = historico[i].vetor[k];
         }
+        recuperou = true;
         break;
+      }
+    }
+    if (!recuperou) {
+      for (let i = inicioBusca - 1; i >= 0; i -= 1) {
+        const va = historico[i].vetor;
+        if (va.length >= 98 && va[92] > 0.5 && (va[94] <= 0.85 || va[93] <= 1.25)) {
+          for (let k = 92; k < 98; k += 1) {
+            vetorBase[k] = va[k];
+          }
+          break;
+        }
       }
     }
   }
@@ -279,14 +378,28 @@ function preverModeloLocal(modelo, caracteristicas) {
   }
 
   const quantidade = modelo.arvores.length || 1;
-  let melhorIndice = 0;
+  const agrupadas = new Map();
   for (let i = 0; i < probabilidades.length; i += 1) {
-    probabilidades[i] /= quantidade;
-    if (probabilidades[i] > probabilidades[melhorIndice]) melhorIndice = i;
+    const prob = probabilidades[i] / quantidade;
+    const rotuloBruto = modelo.rotulos[i] || '';
+    const rotuloExib = MAPA_SUBCLASSES[rotuloBruto] || rotuloBruto;
+    agrupadas.set(rotuloExib, (agrupadas.get(rotuloExib) || 0) + prob);
+  }
+
+  let melhorRotulo = '';
+  let melhorProb = 0;
+  for (const [rotulo, prob] of agrupadas.entries()) {
+    if (prob > melhorProb) {
+      melhorRotulo = rotulo;
+      melhorProb = prob;
+    }
+  }
+  if (melhorRotulo === 'NEUTRO') {
+    return { previsao: '', confianca: 0 };
   }
   return {
-    previsao: modelo.rotulos[melhorIndice] || '',
-    confianca: probabilidades[melhorIndice] || 0,
+    previsao: melhorRotulo,
+    confianca: melhorProb,
   };
 }
 
@@ -342,7 +455,8 @@ function AplicativoPrincipal() {
   const votacoesModeloRef = useRef([]);
   const gravandoGestoRef = useRef(false);
   const preparandoGestoRef = useRef(false);
-  const melhorPredicaoGestoRef = useRef({ rotulo: '', conf: 0, contagem: 0 });
+  const acumuladorGestoRef = useRef({});
+  const ultimoSinalComposicaoRef = useRef({ rotulo: '', instante: 0 });
   const historicoLocalRef = useRef([]);
   const falhasMaoLocalRef = useRef(0);
   const estavaEmMovimentoLocalRef = useRef(false);
@@ -366,7 +480,7 @@ function AplicativoPrincipal() {
     setTempoInferencia((atual) => (atual === valorMs ? atual : valorMs));
   }
 
-  function limparHistoricoPredicao() {
+  function limparHistoricoPredicao(limparComposicao = true) {
     historicoLocalRef.current = [];
     votacoesModeloRef.current = [];
     falhasMaoLocalRef.current = 0;
@@ -374,6 +488,9 @@ function AplicativoPrincipal() {
     ultimaLetraRef.current = '';
     ultimoSinalInseridoRef.current = '';
     contagemEstavelRef.current = 0;
+    if (limparComposicao || ultimoSinalComposicaoRef.current.rotulo !== 'BOM') {
+      ultimoSinalComposicaoRef.current = { rotulo: '', instante: 0 };
+    }
   }
 
   function adicionarAoTexto(sinal) {
@@ -393,6 +510,15 @@ function AplicativoPrincipal() {
       const textoLimpo = anterior.trim();
       if (!textoLimpo) {
         return sinal;
+      }
+      if (sinal === 'BOM DIA') {
+        const semEspacoFim = anterior.trimEnd();
+        if (semEspacoFim === 'BOM') {
+          return 'BOM DIA';
+        }
+        if (semEspacoFim.endsWith(' BOM')) {
+          return `${semEspacoFim.slice(0, -4)} BOM DIA`;
+        }
       }
       if (sinal.length > 1 || anterior.endsWith(' ')) {
         return anterior.endsWith(' ') ? anterior + sinal : `${anterior} ${sinal}`;
@@ -416,7 +542,7 @@ function AplicativoPrincipal() {
   function receberQuadroLocal(evento) {
     try {
       processarQuadroLocal(evento);
-    } catch (_erro) {}
+    } catch (_erro) { }
   }
 
   function processarQuadroLocal(evento) {
@@ -429,15 +555,18 @@ function AplicativoPrincipal() {
       return;
     }
 
-    const listaMaos3d = Array.isArray(dados.pontos_maos_3d) ? dados.pontos_maos_3d : [];
+    const listaMaosBrutas = Array.isArray(dados.pontos_maos_3d) ? dados.pontos_maos_3d : [];
+    const largQuadro = dados.largura_quadro || 360;
+    const altQuadro = dados.altura_quadro || 480;
+    const listaMaos3d = filtrarMaosAtivas(listaMaosBrutas, largQuadro, altQuadro, dados.pontos_pose);
 
     const quadrosMaos = [];
     for (let idx = 0; idx < listaMaos3d.length; idx += 1) {
       const outraMao3d = listaMaos3d.length === 2 ? listaMaos3d[1 - idx] : null;
       const q = calcularVetorQuadro(
         listaMaos3d[idx],
-        dados.largura_quadro || 240,
-        dados.altura_quadro || 320,
+        largQuadro,
+        altQuadro,
         dados.pontos_pose,
         outraMao3d
       );
@@ -451,7 +580,7 @@ function AplicativoPrincipal() {
         setConfianca((atual) => (atual === 0 ? atual : 0));
       }
       if (falhasMaoLocalRef.current >= 5) {
-        limparHistoricoPredicao();
+        limparHistoricoPredicao(false);
         setQuadrosBuffer((atual) => (atual === 0 ? atual : 0));
       }
       atualizarTempoUi(tempoRastreamento);
@@ -562,7 +691,26 @@ function AplicativoPrincipal() {
     votacoes.push(resultado);
     if (votacoes.length > 3) votacoes.shift();
 
-    const { predicao, mediaConf } = escolherRotuloVotacao(votacoes);
+    const { predicao: predicaoBase, mediaConf } = escolherRotuloVotacao(votacoes);
+    let predicao = predicaoBase;
+
+    if (!gravandoGestoRef.current && predicao) {
+      const ultimoComp = ultimoSinalComposicaoRef.current;
+      if (predicao === 'BOM') {
+        ultimoSinalComposicaoRef.current = { rotulo: 'BOM', instante: agoraMs };
+      } else if (
+        (predicao === 'DIA' || predicao === 'D') &&
+        (
+          ultimoComp.rotulo === 'BOM_DIA' ||
+          (ultimoComp.rotulo === 'BOM' && agoraMs - ultimoComp.instante <= JANELA_COMPOSICAO_MS)
+        )
+      ) {
+        predicao = 'BOM DIA';
+        ultimoSinalComposicaoRef.current = { rotulo: 'BOM_DIA', instante: ultimoComp.instante };
+      } else if (ultimoComp.rotulo) {
+        ultimoSinalComposicaoRef.current = { rotulo: '', instante: 0 };
+      }
+    }
 
     if (predicao) {
       const confPct = Math.round(mediaConf * 100);
@@ -573,16 +721,22 @@ function AplicativoPrincipal() {
       setConfianca((atual) => (atual === 0 ? atual : 0));
     }
 
-    if (gravandoGestoRef.current && predicao && mediaConf >= 0.40) {
-      const anterior = melhorPredicaoGestoRef.current;
-      const contagem = anterior.rotulo === predicao ? anterior.contagem + 1 : 1;
-      if (mediaConf >= anterior.conf || contagem > anterior.contagem) {
-        melhorPredicaoGestoRef.current = {
-          rotulo: predicao,
-          conf: mediaConf,
-          contagem,
-        };
-      }
+    if (gravandoGestoRef.current && predicaoBase && mediaConf >= 0.36) {
+      const acumulador = acumuladorGestoRef.current;
+      const reg = acumulador[predicaoBase] || {
+        soma: 0,
+        somaConf: 0,
+        maxConf: 0,
+        contagem: 0,
+        primeiroInstante: agoraMs,
+        ultimoInstante: agoraMs,
+      };
+      reg.soma += mediaConf;
+      reg.somaConf += mediaConf;
+      if (mediaConf > reg.maxConf) reg.maxConf = mediaConf;
+      reg.contagem += 1;
+      reg.ultimoInstante = agoraMs;
+      acumulador[predicaoBase] = reg;
     }
 
     if (!gravandoGestoRef.current && predicao && mediaConf >= 0.48) {
@@ -600,6 +754,9 @@ function AplicativoPrincipal() {
     } else if (!gravandoGestoRef.current && !predicao) {
       ultimaLetraRef.current = '';
       contagemEstavelRef.current = 0;
+      if (ultimoSinalComposicaoRef.current.rotulo === 'BOM_DIA') {
+        ultimoSinalComposicaoRef.current = { rotulo: '', instante: 0 };
+      }
     }
   }
 
@@ -642,7 +799,7 @@ function AplicativoPrincipal() {
     limparHistoricoPredicao();
     gravandoGestoRef.current = true;
     setGravandoGesto(true);
-    melhorPredicaoGestoRef.current = { rotulo: '', conf: 0, contagem: 0 };
+    acumuladorGestoRef.current = {};
     setLetraAtual('Gravando sinal...');
     setTempoGestoRestante(2.5);
 
@@ -661,11 +818,47 @@ function AplicativoPrincipal() {
         setGravandoGesto(false);
         setTempoGestoRestante(0);
 
-        const melhor = melhorPredicaoGestoRef.current;
-        if (melhor.rotulo && melhor.conf >= 0.42) {
-          adicionarAoTexto(melhor.rotulo);
-          setLetraAtual(melhor.rotulo);
-          setConfianca(Math.round(melhor.conf * 100));
+        const acumulador = acumuladorGestoRef.current;
+        const regBom = acumulador.BOM;
+        const regDia = acumulador.DIA && acumulador.D
+          ? {
+            somaConf: acumulador.DIA.somaConf + acumulador.D.somaConf,
+            contagem: acumulador.DIA.contagem + acumulador.D.contagem,
+            maxConf: Math.max(acumulador.DIA.maxConf, acumulador.D.maxConf),
+            ultimoInstante: Math.max(acumulador.DIA.ultimoInstante, acumulador.D.ultimoInstante),
+          }
+          : (acumulador.DIA || acumulador.D);
+        let melhorRotulo = '';
+        let melhorReg = null;
+
+        if (
+          regBom &&
+          regDia &&
+          regBom.primeiroInstante <= regDia.ultimoInstante &&
+          (regBom.contagem >= 2 || regBom.maxConf >= 0.42) &&
+          (regDia.contagem >= 2 || regDia.maxConf >= 0.42)
+        ) {
+          melhorRotulo = 'BOM DIA';
+          melhorReg = {
+            somaConf: regBom.somaConf + regDia.somaConf,
+            contagem: regBom.contagem + regDia.contagem,
+            maxConf: Math.max(regBom.maxConf, regDia.maxConf),
+          };
+        } else {
+          for (const [rotulo, reg] of Object.entries(acumulador)) {
+            const valido = reg.contagem >= 2 || reg.maxConf >= 0.48;
+            if (!valido) continue;
+            if (!melhorReg || reg.soma > melhorReg.soma) {
+              melhorRotulo = rotulo;
+              melhorReg = reg;
+            }
+          }
+        }
+        if (melhorRotulo && melhorReg) {
+          const confFinal = Math.max(melhorReg.somaConf / melhorReg.contagem, melhorReg.maxConf * 0.9);
+          adicionarAoTexto(melhorRotulo);
+          setLetraAtual(melhorRotulo);
+          setConfianca(Math.round(confFinal * 100));
         } else {
           setLetraAtual('Sinal nao reconhecido');
           setConfianca(0);
@@ -800,8 +993,8 @@ function AplicativoPrincipal() {
               {contagemRegressiva > 0
                 ? `Prepare-se (${contagemRegressiva}s)...`
                 : gravandoGesto
-                ? `Gravando Gesto... (${tempoGestoRestante}s)`
-                : 'Gravar Gesto Longo (2.5s)'}
+                  ? `Gravando Gesto... (${tempoGestoRestante}s)`
+                  : 'Gravar Gesto Longo (2.5s)'}
             </Text>
           </TouchableOpacity>
 

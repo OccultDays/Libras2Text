@@ -271,16 +271,18 @@ def configurar_trajetoria_sinal(sinal, rng, nariz_x, nariz_y, larg_ombros, lado)
         py = float(rng.uniform(0.36, 0.78))
         rot_max = 9.0 if sinal == "B" else (27.0 if sinal in ("C", "D", "A", "L") else 17.0)
         rot_base = float(rng.uniform(-14.0, rot_max)) * sinal_dir
-        entrada_leve = bool(rng.random() < 0.32)
-        dy_ent = float(rng.uniform(-0.050, -0.015)) if entrada_leve else float(rng.normal(0.0, 0.008))
-        dx_ent = float(rng.normal(0.0, 0.018 if entrada_leve else 0.008))
+        entrada_leve = bool(rng.random() < 0.40)
+        dy_ent = float(rng.uniform(-0.11, -0.02)) if entrada_leve else float(rng.normal(0.0, 0.012))
+        dx_ent = float(rng.normal(0.0, 0.038 if entrada_leve else 0.010))
         cfg.update(
             molde_ini=molde,
             molde_fim=molde,
             rot_ini=rot_base,
-            rot_fim=rot_base + float(rng.uniform(-3.0, 3.0)),
+            rot_fim=rot_base + float(rng.uniform(-5.0, 5.0)),
             pos_ini=(px, py),
             pos_fim=(px + dx_ent, py + dy_ent),
+            osc_x=float(rng.uniform(0.005, 0.016)) if entrada_leve else 0.0,
+            osc_y=float(rng.uniform(0.005, 0.020)) if entrada_leve else 0.0,
             estatico=not entrada_leve,
         )
         return cfg
@@ -290,22 +292,22 @@ def configurar_trajetoria_sinal(sinal, rng, nariz_x, nariz_y, larg_ombros, lado)
         px = float(rng.uniform(0.20, 0.80))
         py = float(rng.uniform(0.38, 0.76))
         rot_base = float(rng.uniform(-14.0, 16.0))
-        leve_descida = bool(rng.random() < 0.25)
+        leve_descida = bool(rng.random() < 0.35)
         cfg.update(
             molde_ini=molde,
             molde_fim=molde,
             rot_ini=rot_base,
-            rot_fim=rot_base + (6.0 * sinal_dir if leve_descida else float(rng.uniform(-2.0, 2.0))),
+            rot_fim=rot_base + (6.0 * sinal_dir if leve_descida else float(rng.uniform(-3.0, 3.0))),
             pos_ini=(px, py),
-            pos_fim=(px, py + (0.035 if leve_descida else float(rng.normal(0.0, 0.007)))),
+            pos_fim=(px + float(rng.normal(0.0, 0.02)), py + (0.045 if leve_descida else float(rng.normal(0.0, 0.010)))),
             estatico=not leve_descida,
         )
         return cfg
 
     if sinal == "OI":
         variante = float(rng.random())
-        px = nariz_x - sinal_dir * float(rng.uniform(0.14, 0.32))
-        py = nariz_y + larg_ombros * float(rng.uniform(0.42, 0.78))
+        px = nariz_x - sinal_dir * larg_ombros * float(rng.uniform(0.18, 0.65))
+        py = nariz_y + larg_ombros * float(rng.uniform(0.32, 0.72))
         if variante < 0.42:
             m_ini = escolher_molde_par(rng, "O_ines", "O_pdf", misturar=False)
             m_fim = escolher_molde_par(rng, "OI_fim", "I_ines", misturar=True)
@@ -316,7 +318,8 @@ def configurar_trajetoria_sinal(sinal, rng, nariz_x, nariz_y, larg_ombros, lado)
                 rot_fim=float(rng.uniform(6.0, 18.0)) * sinal_dir,
                 pos_ini=(px + sinal_dir * 0.05, py - 0.02),
                 pos_fim=(px - sinal_dir * 0.04, py + 0.03),
-                osc_x=float(rng.uniform(0.012, 0.030)),
+                osc_x=float(rng.uniform(0.015, 0.040)),
+                osc_y=float(rng.uniform(0.010, 0.035)),
                 osc_rot=float(rng.uniform(8.0, 18.0)),
                 osc_esc_x=0.14,
             )
@@ -329,14 +332,15 @@ def configurar_trajetoria_sinal(sinal, rng, nariz_x, nariz_y, larg_ombros, lado)
                 rot_fim=float(rng.uniform(4.0, 20.0)) * sinal_dir,
                 pos_ini=(px, py),
                 pos_fim=(px - sinal_dir * 0.02, py),
-                osc_x=float(rng.uniform(0.024, 0.055)),
+                osc_x=float(rng.uniform(0.024, 0.060)),
+                osc_y=float(rng.uniform(0.012, 0.040)),
                 osc_rot=float(rng.uniform(14.0, 26.0)),
                 osc_esc_x=0.18,
             )
         else:
             m_ola = interpolar_molde("CINCO", "CINCO", 0.0)
-            py_ola = nariz_y + larg_ombros * float(rng.uniform(0.28, 0.62))
-            px_ola = nariz_x - sinal_dir * float(rng.uniform(0.20, 0.36))
+            py_ola = nariz_y + larg_ombros * float(rng.uniform(0.24, 0.60))
+            px_ola = nariz_x - sinal_dir * larg_ombros * float(rng.uniform(0.25, 0.72))
             so_punho = bool(rng.random() < 0.35)
             cfg.update(
                 molde_ini=m_ola,
@@ -345,39 +349,133 @@ def configurar_trajetoria_sinal(sinal, rng, nariz_x, nariz_y, larg_ombros, lado)
                 rot_fim=float(rng.uniform(-8.0, 10.0)) * sinal_dir,
                 pos_ini=(px_ola, py_ola),
                 pos_fim=(px_ola + sinal_dir * 0.02, py_ola + 0.02),
-                osc_x=float(rng.uniform(0.018, 0.032) if so_punho else rng.uniform(0.040, 0.082)),
+                osc_x=float(rng.uniform(0.020, 0.038) if so_punho else rng.uniform(0.045, 0.090)),
+                osc_y=float(rng.uniform(0.010, 0.035)),
                 osc_rot=float(rng.uniform(18.0, 28.0) if so_punho else rng.uniform(12.0, 22.0)),
             )
         return cfg
 
-    if sinal == "BOM DIA":
+    if sinal == "BOM":
+        boca_x = nariz_x - sinal_dir * larg_ombros * float(rng.uniform(0.06, 0.36))
+        boca_y = nariz_y + larg_ombros * float(rng.uniform(0.34, 0.78))
         variante = float(rng.random())
-        boca_x = nariz_x - sinal_dir * float(rng.uniform(0.06, 0.14))
-        boca_y = nariz_y + larg_ombros * float(rng.uniform(0.76, 1.02))
-        if variante < 0.58:
-            m_ini = escolher_molde_par(rng, "O_ines", "BOM_ini", misturar=False)
-            m_fim = interpolar_molde("BOM_fim", "CINCO", float(rng.uniform(0.0, 0.30)))
+        if variante < 0.65:
+            m_ini = escolher_molde_par(rng, "S_pdf", "E_ines", misturar=True) if rng.random() < 0.55 else escolher_molde_par(rng, "O_ines", "BOM_ini", misturar=False)
+            m_fim = interpolar_molde("B_ines", "BOM_fim", float(rng.uniform(0.0, 0.65))) if rng.random() < 0.60 else interpolar_molde("CINCO", "BOM_fim", float(rng.uniform(0.0, 0.55)))
+        else:
+            m_ini = escolher_molde_par(rng, "O_ines", "BOM_ini", misturar=True)
+            m_fim = interpolar_molde("CINCO", "B_ines", float(rng.uniform(0.0, 0.45)))
+        cfg.update(
+            molde_ini=m_ini,
+            molde_fim=m_fim,
+            rot_ini=float(rng.uniform(4.0, 26.0)) * sinal_dir,
+            rot_fim=float(rng.uniform(10.0, 34.0)) * sinal_dir,
+            pos_ini=(boca_x, boca_y),
+            pos_fim=(boca_x - sinal_dir * larg_ombros * float(rng.uniform(0.04, 0.28)), boca_y + float(rng.uniform(0.02, 0.14))),
+            osc_x=float(rng.uniform(0.010, 0.032)),
+            osc_y=float(rng.uniform(0.012, 0.040)),
+            ancorado=True,
+        )
+        return cfg
+
+    if sinal == "DIA_ROSTO":
+        m_d = escolher_molde_par(rng, "D_ines", "D_pdf", misturar=False) if rng.random() < 0.80 else interpolar_molde("DIA_fim", "DIA_fim", 0.0)
+        variante = float(rng.random())
+        if variante < 0.55:
+            # Mao em D saindo da tempora/rosto para a lateral
             cfg.update(
-                molde_ini=m_ini,
-                molde_fim=m_fim,
-                rot_ini=float(rng.uniform(14.0, 28.0)) * sinal_dir,
-                rot_fim=float(rng.uniform(22.0, 38.0)) * sinal_dir,
-                pos_ini=(boca_x, boca_y),
-                pos_fim=(boca_x - sinal_dir * float(rng.uniform(0.02, 0.08)), boca_y + float(rng.uniform(0.05, 0.12))),
+                molde_ini=interpolar_molde("E_ines", "D_ines", float(rng.uniform(0.45, 0.90))),
+                molde_fim=m_d,
+                rot_ini=float(rng.uniform(-6.0, 14.0)) * sinal_dir,
+                rot_fim=float(rng.uniform(-10.0, 12.0)) * sinal_dir,
+                pos_ini=(nariz_x - sinal_dir * larg_ombros * float(rng.uniform(0.18, 0.52)), nariz_y + larg_ombros * float(rng.uniform(0.18, 0.52))),
+                pos_fim=(nariz_x - sinal_dir * larg_ombros * float(rng.uniform(0.55, 0.96)), nariz_y + larg_ombros * float(rng.uniform(0.24, 0.60))),
+                osc_x=float(rng.uniform(0.015, 0.045)),
+                osc_y=float(rng.uniform(0.010, 0.035)),
                 ancorado=True,
             )
         else:
-            m_ini = escolher_molde_par(rng, "BOM_fim", "O_ines", misturar=False)
-            m_meio = interpolar_molde("CINCO", "DIA_fim", 0.50)
-            m_fim = interpolar_molde("DIA_fim", "DIA_fim", 0.0)
+            # Mao em D cruzando do centro/bochecha oposta para a lateral (variacao UFV/MG)
             cfg.update(
-                molde_ini=m_ini,
-                molde_meio=m_meio,
-                molde_fim=m_fim,
-                rot_ini=float(rng.uniform(14.0, 28.0)) * sinal_dir,
-                rot_fim=float(rng.uniform(-6.0, 12.0)) * sinal_dir,
-                pos_ini=(boca_x, boca_y),
-                pos_fim=(nariz_x - sinal_dir * float(rng.uniform(0.24, 0.35)), nariz_y + larg_ombros * float(rng.uniform(0.62, 0.84))),
+                molde_ini=interpolar_molde("CINCO", "D_ines", float(rng.uniform(0.35, 0.85))),
+                molde_fim=m_d,
+                rot_ini=float(rng.uniform(-4.0, 16.0)) * sinal_dir,
+                rot_fim=float(rng.uniform(-8.0, 12.0)) * sinal_dir,
+                pos_ini=(nariz_x + sinal_dir * larg_ombros * float(rng.uniform(-0.08, 0.25)), nariz_y + larg_ombros * float(rng.uniform(0.26, 0.54))),
+                pos_fim=(nariz_x - sinal_dir * larg_ombros * float(rng.uniform(0.68, 1.15)), nariz_y + larg_ombros * float(rng.uniform(0.22, 0.50))),
+                osc_x=float(rng.uniform(0.025, 0.060)),
+                osc_y=float(rng.uniform(0.010, 0.032)),
+                ancorado=True,
+            )
+        return cfg
+
+    if sinal == "DIA_SOL":
+        # Variacao bimanual de DIA: mao base horizontal no peito e mao em D desenhando arco sobre ela
+        m_d = escolher_molde_par(rng, "D_ines", "D_pdf", misturar=False)
+        m_base = escolher_molde_par(rng, "B_ines", "B_perfil", misturar=True)
+        peito_y = nariz_y + larg_ombros * float(rng.uniform(0.50, 0.90))
+        cfg.update(
+            molde_ini=m_d,
+            molde_fim=m_d,
+            rot_ini=float(rng.uniform(-35.0, 15.0)) * sinal_dir,
+            rot_fim=float(rng.uniform(35.0, 95.0)) * sinal_dir,
+            pos_ini=(nariz_x - sinal_dir * larg_ombros * float(rng.uniform(0.05, 0.30)), peito_y - larg_ombros * float(rng.uniform(0.25, 0.50))),
+            pos_fim=(nariz_x + sinal_dir * larg_ombros * float(rng.uniform(0.10, 0.42)), peito_y + float(rng.uniform(-0.04, 0.06))),
+            osc_x=float(rng.uniform(0.015, 0.045)),
+            osc_y=float(rng.uniform(0.020, 0.055)),
+            ancorado=True,
+            segunda_mao={
+                "molde": m_base,
+                "pos_ini": (nariz_x - sinal_dir * larg_ombros * float(rng.uniform(0.05, 0.25)), peito_y + float(rng.uniform(0.04, 0.12))),
+                "pos_fim": (nariz_x - sinal_dir * larg_ombros * float(rng.uniform(0.05, 0.25)), peito_y + float(rng.uniform(0.04, 0.12))),
+                "rot_ini": float(rng.uniform(-95.0, -68.0)) * sinal_dir,
+                "rot_fim": float(rng.uniform(-95.0, -68.0)) * sinal_dir,
+                "lado": -lado,
+            },
+        )
+        return cfg
+
+    if sinal == "NEUTRO":
+        variante = float(rng.random())
+        molde_rel = interpolar_molde("C_ines", "O_ines", float(rng.uniform(0.0, 0.70))) if rng.random() < 0.6 else interpolar_molde("E_ines", "CINCO", float(rng.uniform(0.2, 0.6)))
+        if variante < 0.65:
+            # Maos relaxadas ou penduradas na regiao baixa (repouso / cintura)
+            px = nariz_x - sinal_dir * larg_ombros * float(rng.uniform(0.10, 0.55))
+            py = min(0.95, nariz_y + larg_ombros * float(rng.uniform(0.98, 1.45)))
+            rot_baixo = float(rng.uniform(115.0, 180.0)) * sinal_dir
+            cfg.update(
+                molde_ini=molde_rel,
+                molde_fim=molde_rel,
+                rot_ini=rot_baixo,
+                rot_fim=rot_baixo + float(rng.uniform(-12.0, 12.0)),
+                pos_ini=(px, py),
+                pos_fim=(px + float(rng.normal(0.0, 0.015)), min(0.96, py + float(rng.normal(0.0, 0.015)))),
+                estatico=True,
+                ancorado=True,
+            )
+            if rng.random() < 0.50:
+                cfg["segunda_mao"] = {
+                    "molde": molde_rel,
+                    "pos_ini": (nariz_x + sinal_dir * larg_ombros * float(rng.uniform(0.08, 0.45)), min(0.95, py + float(rng.uniform(-0.02, 0.04)))),
+                    "pos_fim": (nariz_x + sinal_dir * larg_ombros * float(rng.uniform(0.08, 0.45)), min(0.95, py + float(rng.uniform(-0.02, 0.04)))),
+                    "rot_ini": -rot_baixo,
+                    "rot_fim": -rot_baixo,
+                    "lado": -lado,
+                }
+        else:
+            # Transicao vertical rapida (subindo ou descendo a mao entre sinais)
+            px = nariz_x - sinal_dir * larg_ombros * float(rng.uniform(0.10, 0.60))
+            descendo = bool(rng.random() < 0.55)
+            py_alto = nariz_y + larg_ombros * float(rng.uniform(0.42, 0.78))
+            py_baixo = min(0.94, nariz_y + larg_ombros * float(rng.uniform(1.05, 1.42)))
+            cfg.update(
+                molde_ini=molde_rel,
+                molde_fim=molde_rel,
+                rot_ini=float(rng.uniform(-35.0, 45.0)) * sinal_dir,
+                rot_fim=float(rng.uniform(80.0, 160.0) if descendo else rng.uniform(-25.0, 35.0)) * sinal_dir,
+                pos_ini=(px, py_alto if descendo else py_baixo),
+                pos_fim=(px + float(rng.normal(0.0, 0.04)), py_baixo if descendo else py_alto),
+                osc_y=float(rng.uniform(0.015, 0.045)),
                 ancorado=True,
             )
         return cfg
@@ -386,61 +484,101 @@ def configurar_trajetoria_sinal(sinal, rng, nariz_x, nariz_y, larg_ombros, lado)
         usar_perfil = bool(rng.random() < 0.55)
         abre_leve = bool(rng.random() < 0.65)
         if usar_perfil:
-            m_ini = interpolar_molde("OBRIGADO_mao", "B_ines", float(rng.uniform(0.0, 0.30)))
+            m_ini = interpolar_molde("OBRIGADO_mao", "B_ines", float(rng.uniform(0.0, 0.35)))
             m_fim = interpolar_molde("OBRIGADO_mao", "CINCO", float(rng.uniform(0.0, 0.35))) if abre_leve else m_ini
         else:
             m_ini = interpolar_molde("B_pdf", "B_ines", 0.35) if abre_leve else escolher_molde_par(rng, "B_ines", "B_pdf", misturar=True)
             m_fim = interpolar_molde("B_ines", "CINCO", float(rng.uniform(0.20, 0.50))) if abre_leve else m_ini
-        ini_x = nariz_x - sinal_dir * larg_ombros * float(rng.uniform(0.35, 0.65))
-        ini_y = nariz_y + larg_ombros * float(rng.uniform(0.02, 0.22))
-        afastar_lateral = bool(rng.random() < 0.65)
-        fim_x = ini_x - sinal_dir * larg_ombros * float(rng.uniform(0.18, 0.36))
-        fim_y = ini_y + (float(rng.uniform(0.02, 0.07)) if afastar_lateral else float(rng.uniform(0.10, 0.22)))
+        ini_x = nariz_x - sinal_dir * larg_ombros * float(rng.uniform(0.08, 0.48))
+        ini_y = nariz_y + larg_ombros * float(rng.uniform(-0.02, 0.32))
+        afastar_lateral = bool(rng.random() < 0.55)
+        fim_x = ini_x - sinal_dir * larg_ombros * float(rng.uniform(0.14, 0.36))
+        fim_y = ini_y + (float(rng.uniform(0.03, 0.10)) if afastar_lateral else float(rng.uniform(0.12, 0.25)))
+        usar_duas = bool(rng.random() < 0.28)
         cfg.update(
             molde_ini=m_ini,
             molde_fim=m_fim,
-            rot_ini=float(rng.uniform(14.0, 34.0)) * sinal_dir,
-            rot_fim=float(rng.uniform(10.0, 26.0)) * sinal_dir,
+            rot_ini=float(rng.uniform(10.0, 32.0)) * sinal_dir,
+            rot_fim=float(rng.uniform(6.0, 24.0)) * sinal_dir,
             pos_ini=(ini_x, ini_y),
             pos_fim=(fim_x, fim_y),
-            osc_x=float(rng.uniform(0.012, 0.032)) if afastar_lateral else 0.0,
-            osc_y=float(rng.uniform(0.010, 0.026)) if afastar_lateral else 0.0,
-            ancorado=True,
-        )
-        return cfg
-
-    if sinal == "POR FAVOR":
-        m_b = interpolar_molde("B_perfil", "B_ines", float(rng.uniform(0.0, 0.40))) if rng.random() < 0.50 else escolher_molde_par(rng, "B_ines", "B_pdf", misturar=True)
-        peito_y = nariz_y + larg_ombros * float(rng.uniform(0.72, 1.04))
-        usar_duas = bool(rng.random() < 0.70)
-        ini_x = nariz_x - sinal_dir * float(rng.uniform(0.02, 0.12))
-        fim_x = ini_x - sinal_dir * float(rng.uniform(0.05, 0.12))
-        cfg.update(
-            molde_ini=m_b,
-            molde_fim=m_b,
-            rot_ini=float(rng.uniform(46.0, 68.0)) * sinal_dir,
-            rot_fim=float(rng.uniform(40.0, 62.0)) * sinal_dir,
-            pos_ini=(ini_x, peito_y),
-            pos_fim=(fim_x, peito_y + float(rng.uniform(-0.02, 0.04))),
-            osc_x=0.015 if usar_duas else float(rng.uniform(0.030, 0.060)),
+            osc_x=float(rng.uniform(0.010, 0.030)) if afastar_lateral else 0.0,
+            osc_y=float(rng.uniform(0.012, 0.032)),
             ancorado=True,
         )
         if usar_duas:
-            base_x = nariz_x + sinal_dir * float(rng.uniform(0.16, 0.26))
-            base_y = peito_y + float(rng.uniform(0.01, 0.05))
             cfg["segunda_mao"] = {
-                "molde": m_b,
-                "pos_ini": (base_x, base_y),
-                "pos_fim": (base_x - sinal_dir * 0.04, base_y),
-                "rot_ini": float(rng.uniform(-42.0, -22.0)) * sinal_dir,
-                "rot_fim": float(rng.uniform(-38.0, -20.0)) * sinal_dir,
+                "molde": m_ini,
+                "pos_ini": (nariz_x + sinal_dir * larg_ombros * float(rng.uniform(0.08, 0.30)), ini_y + larg_ombros * float(rng.uniform(0.28, 0.55))),
+                "pos_fim": (nariz_x + sinal_dir * larg_ombros * float(rng.uniform(0.10, 0.36)), fim_y + larg_ombros * float(rng.uniform(0.32, 0.62))),
+                "rot_ini": float(rng.uniform(-24.0, -4.0)) * sinal_dir,
+                "rot_fim": float(rng.uniform(-20.0, -2.0)) * sinal_dir,
                 "lado": -lado,
             }
         return cfg
 
+    if sinal == "POR FAVOR":
+        m_b = interpolar_molde("B_perfil", "B_ines", float(rng.uniform(0.0, 0.40))) if rng.random() < 0.55 else escolher_molde_par(rng, "B_ines", "B_pdf", misturar=True)
+        peito_y = nariz_y + larg_ombros * float(rng.uniform(0.50, 0.94))
+        palmas_paralelas = bool(rng.random() < 0.55)
+        usar_duas = bool(rng.random() < 0.80)
+        if palmas_paralelas:
+            ini_x = nariz_x - sinal_dir * larg_ombros * float(rng.uniform(0.12, 0.36))
+            fim_x = ini_x - sinal_dir * float(rng.uniform(0.02, 0.07))
+            rot1 = float(rng.uniform(14.0, 44.0)) * sinal_dir
+            cfg.update(
+                molde_ini=m_b,
+                molde_fim=m_b,
+                rot_ini=rot1,
+                rot_fim=rot1 + float(rng.uniform(-8.0, 8.0)),
+                pos_ini=(ini_x, peito_y),
+                pos_fim=(fim_x, peito_y + float(rng.uniform(-0.04, 0.06))),
+                osc_x=float(rng.uniform(0.015, 0.045)),
+                osc_y=float(rng.uniform(0.028, 0.075)),
+                ancorado=True,
+            )
+            if usar_duas:
+                base_x = nariz_x + sinal_dir * larg_ombros * float(rng.uniform(0.10, 0.38))
+                base_y = peito_y + float(rng.uniform(-0.02, 0.04))
+                rot2 = float(rng.uniform(-32.0, 12.0)) * sinal_dir if rng.random() < 0.5 else -rot1 * float(rng.uniform(0.5, 1.0))
+                cfg["segunda_mao"] = {
+                    "molde": m_b,
+                    "pos_ini": (base_x, base_y),
+                    "pos_fim": (base_x - sinal_dir * 0.02, base_y + float(rng.uniform(-0.03, 0.04))),
+                    "rot_ini": rot2,
+                    "rot_fim": rot2 + float(rng.uniform(-8.0, 8.0)),
+                    "lado": -lado,
+                }
+        else:
+            ini_x = nariz_x - sinal_dir * float(rng.uniform(0.04, 0.15))
+            fim_x = ini_x - sinal_dir * float(rng.uniform(0.04, 0.12))
+            cfg.update(
+                molde_ini=m_b,
+                molde_fim=m_b,
+                rot_ini=float(rng.uniform(44.0, 72.0)) * sinal_dir,
+                rot_fim=float(rng.uniform(38.0, 66.0)) * sinal_dir,
+                pos_ini=(ini_x, peito_y),
+                pos_fim=(fim_x, peito_y + float(rng.uniform(-0.03, 0.05))),
+                osc_x=float(rng.uniform(0.020, 0.055)),
+                osc_y=float(rng.uniform(0.025, 0.068)),
+                ancorado=True,
+            )
+            if usar_duas:
+                base_x = nariz_x + sinal_dir * float(rng.uniform(0.14, 0.28))
+                base_y = peito_y + float(rng.uniform(0.0, 0.06))
+                cfg["segunda_mao"] = {
+                    "molde": m_b,
+                    "pos_ini": (base_x, base_y),
+                    "pos_fim": (base_x - sinal_dir * 0.04, base_y + float(rng.uniform(-0.02, 0.03))),
+                    "rot_ini": float(rng.uniform(-52.0, -24.0)) * sinal_dir,
+                    "rot_fim": float(rng.uniform(-46.0, -20.0)) * sinal_dir,
+                    "lado": -lado,
+                }
+        return cfg
+
     if sinal == "SIM":
-        px = nariz_x + sinal_dir * float(rng.uniform(0.06, 0.26))
-        py = nariz_y + larg_ombros * float(rng.uniform(0.40, 1.15))
+        px = nariz_x + sinal_dir * larg_ombros * float(rng.uniform(0.18, 0.62))
+        py = nariz_y + larg_ombros * float(rng.uniform(0.24, 0.86))
         nod_frontal = bool(rng.random() < 0.60)
         if nod_frontal:
             cfg.update(
@@ -449,8 +587,8 @@ def configurar_trajetoria_sinal(sinal, rng, nariz_x, nariz_y, larg_ombros, lado)
                 rot_ini=float(rng.uniform(-16.0, 8.0)) * sinal_dir,
                 rot_fim=float(rng.uniform(-54.0, -28.0)) * sinal_dir,
                 pos_ini=(px, py),
-                pos_fim=(px + sinal_dir * float(rng.uniform(0.02, 0.06)), py + float(rng.uniform(0.05, 0.11))),
-                osc_y=float(rng.uniform(0.015, 0.035)),
+                pos_fim=(px + sinal_dir * float(rng.uniform(-0.04, 0.06)), py + float(rng.uniform(-0.04, 0.11))),
+                osc_y=float(rng.uniform(0.025, 0.065)),
                 ancorado=True,
             )
         else:
@@ -461,8 +599,8 @@ def configurar_trajetoria_sinal(sinal, rng, nariz_x, nariz_y, larg_ombros, lado)
                 rot_ini=float(rng.uniform(-20.0, 10.0)) * sinal_dir,
                 rot_fim=float(rng.uniform(-34.0, -6.0)) * sinal_dir,
                 pos_ini=(px, py),
-                pos_fim=(px, py + float(rng.uniform(0.03, 0.08))),
-                osc_y=float(rng.uniform(0.038, 0.070)),
+                pos_fim=(px, py + float(rng.uniform(-0.05, 0.08))),
+                osc_y=float(rng.uniform(0.038, 0.080)),
                 osc_rot=float(rng.uniform(12.0, 22.0)),
                 ancorado=True,
             )
@@ -470,8 +608,8 @@ def configurar_trajetoria_sinal(sinal, rng, nariz_x, nariz_y, larg_ombros, lado)
 
     if sinal == "NAO":
         usar_y = bool(rng.random() < 0.42)
-        px = nariz_x - sinal_dir * float(rng.uniform(0.14, 0.34))
-        py = nariz_y + larg_ombros * float(rng.uniform(0.55, 0.98))
+        px = nariz_x - sinal_dir * larg_ombros * float(rng.uniform(0.15, 0.68))
+        py = nariz_y + larg_ombros * float(rng.uniform(0.45, 0.96))
         so_punho = bool(rng.random() < 0.40)
         if usar_y:
             molde = escolher_molde_par(rng, "Y_ines", "Y_pdf", misturar=True)
@@ -481,8 +619,9 @@ def configurar_trajetoria_sinal(sinal, rng, nariz_x, nariz_y, larg_ombros, lado)
                 rot_ini=float(rng.uniform(-14.0, 16.0)),
                 rot_fim=float(rng.uniform(-14.0, 16.0)),
                 pos_ini=(px, py),
-                pos_fim=(px + sinal_dir * float(rng.uniform(-0.04, 0.04)), py + float(rng.uniform(0.0, 0.08))),
-                osc_x=float(rng.uniform(0.024, 0.042) if so_punho else rng.uniform(0.042, 0.078)),
+                pos_fim=(px + sinal_dir * float(rng.uniform(-0.04, 0.04)), py + float(rng.uniform(-0.04, 0.08))),
+                osc_x=float(rng.uniform(0.020, 0.045) if so_punho else rng.uniform(0.042, 0.082)),
+                osc_y=float(rng.uniform(0.008, 0.030)),
                 osc_rot=float(rng.uniform(18.0, 30.0)),
             )
         else:
@@ -493,16 +632,17 @@ def configurar_trajetoria_sinal(sinal, rng, nariz_x, nariz_y, larg_ombros, lado)
                 rot_ini=float(rng.uniform(-12.0, 12.0)),
                 rot_fim=float(rng.uniform(-10.0, 12.0)),
                 pos_ini=(px, py),
-                pos_fim=(px + sinal_dir * float(rng.uniform(-0.03, 0.03)), py + float(rng.uniform(0.0, 0.04))),
-                osc_x=float(rng.uniform(0.018, 0.034) if so_punho else rng.uniform(0.040, 0.078)),
+                pos_fim=(px + sinal_dir * float(rng.uniform(-0.04, 0.04)), py + float(rng.uniform(-0.03, 0.05))),
+                osc_x=float(rng.uniform(0.018, 0.038) if so_punho else rng.uniform(0.040, 0.080)),
+                osc_y=float(rng.uniform(0.008, 0.025)),
                 osc_rot=float(rng.uniform(16.0, 28.0)),
             )
         return cfg
 
     if sinal == "EU":
         usar_molde_eu = bool(rng.random() < 0.65)
-        peito_x = nariz_x + sinal_dir * float(rng.uniform(0.06, 0.15))
-        peito_y = nariz_y + larg_ombros * float(rng.uniform(0.76, 1.00))
+        peito_x = nariz_x + sinal_dir * larg_ombros * float(rng.uniform(0.18, 0.52))
+        peito_y = nariz_y + larg_ombros * float(rng.uniform(0.56, 0.86))
         if usar_molde_eu:
             molde = interpolar_molde("EU_mao", "EU_mao", 0.0)
             rot_i = float(rng.uniform(-12.0, 12.0)) * sinal_dir
@@ -514,34 +654,38 @@ def configurar_trajetoria_sinal(sinal, rng, nariz_x, nariz_y, larg_ombros, lado)
             molde_fim=molde,
             rot_ini=rot_i,
             rot_fim=rot_i + float(rng.uniform(-5.0, 5.0)),
-            pos_ini=(peito_x + sinal_dir * 0.04, peito_y),
-            pos_fim=(peito_x, peito_y + float(rng.uniform(-0.01, 0.02))),
+            pos_ini=(peito_x + sinal_dir * 0.05, peito_y),
+            pos_fim=(peito_x, peito_y + float(rng.uniform(-0.03, 0.03))),
+            osc_x=float(rng.uniform(0.008, 0.028)),
+            osc_y=float(rng.uniform(0.008, 0.025)),
             ancorado=True,
         )
         return cfg
 
     if sinal == "VOCE":
         molde = interpolar_molde("VOCE_mao", "NAO_ind", float(rng.uniform(0.0, 0.28)))
-        px = nariz_x + sinal_dir * float(rng.uniform(0.03, 0.14))
-        py = nariz_y + larg_ombros * float(rng.uniform(0.42, 0.85))
+        px = nariz_x + sinal_dir * larg_ombros * float(rng.uniform(0.08, 0.42))
+        py = nariz_y + larg_ombros * float(rng.uniform(0.30, 0.68))
         cfg.update(
             molde_ini=molde,
             molde_fim=molde,
             rot_ini=float(rng.uniform(-8.0, 12.0)) * sinal_dir,
             rot_fim=float(rng.uniform(-6.0, 14.0)) * sinal_dir,
             pos_ini=(px, py),
-            pos_fim=(px + sinal_dir * float(rng.uniform(-0.01, 0.03)), py + float(rng.uniform(0.02, 0.09))),
+            pos_fim=(px + sinal_dir * float(rng.uniform(-0.02, 0.04)), py + float(rng.uniform(-0.02, 0.09))),
+            osc_x=float(rng.uniform(0.008, 0.030)),
+            osc_y=float(rng.uniform(0.008, 0.030)),
             ancorado=True,
         )
         return cfg
 
     if sinal == "CASA":
         m_b = interpolar_molde("B_perfil", "B_ines", float(rng.uniform(0.0, 0.35))) if rng.random() < 0.65 else escolher_molde_par(rng, "B_ines", "B_pdf", misturar=True)
-        usar_duas = bool(rng.random() < 0.84)
-        altura_y = nariz_y + larg_ombros * float(rng.uniform(0.62, 0.90))
-        meia_dist = float(rng.uniform(0.10, 0.18))
+        usar_duas = bool(rng.random() < 0.88)
+        altura_y = nariz_y + larg_ombros * float(rng.uniform(0.20, 0.68))
+        meia_dist = float(rng.uniform(0.14, 0.24))
         toque_duplo = bool(usar_duas and rng.random() < 0.70)
-        inclinacao = float(rng.uniform(10.0, 42.0))
+        inclinacao = float(rng.uniform(20.0, 46.0))
         cfg.update(
             molde_ini=m_b,
             molde_fim=m_b,
@@ -549,15 +693,15 @@ def configurar_trajetoria_sinal(sinal, rng, nariz_x, nariz_y, larg_ombros, lado)
             rot_fim=(inclinacao + float(rng.uniform(-4.0, 6.0))) * sinal_dir,
             pos_ini=(nariz_x - sinal_dir * (meia_dist + 0.03), altura_y + 0.02),
             pos_fim=(nariz_x - sinal_dir * meia_dist, altura_y - (0.01 if usar_duas else 0.08)),
-            osc_x=float(rng.uniform(0.025, 0.065)) if toque_duplo else 0.0,
-            osc_y=float(rng.uniform(0.015, 0.045)) if toque_duplo else 0.0,
+            osc_x=float(rng.uniform(0.025, 0.068)) if toque_duplo else float(rng.uniform(0.008, 0.025)),
+            osc_y=float(rng.uniform(0.015, 0.050)) if toque_duplo else float(rng.uniform(0.008, 0.025)),
             ancorado=True,
         )
         if usar_duas:
             inclinacao2 = inclinacao + float(rng.uniform(-6.0, 6.0))
             cfg["segunda_mao"] = {
                 "molde": m_b,
-                "pos_ini": (nariz_x + sinal_dir * (meia_dist + 0.03), altura_y + float(rng.uniform(0.0, 0.03))),
+                "pos_ini": (nariz_x + sinal_dir * (meia_dist + 0.03), altura_y + float(rng.uniform(-0.01, 0.03))),
                 "pos_fim": (nariz_x + sinal_dir * meia_dist, altura_y + float(rng.uniform(-0.02, 0.02))),
                 "rot_ini": -inclinacao2 * sinal_dir,
                 "rot_fim": -(inclinacao2 + float(rng.uniform(-4.0, 4.0))) * sinal_dir,
@@ -567,49 +711,51 @@ def configurar_trajetoria_sinal(sinal, rng, nariz_x, nariz_y, larg_ombros, lado)
 
     if sinal == "AJUDA":
         variante = float(rng.random())
-        peito_y = nariz_y + larg_ombros * float(rng.uniform(0.60, 0.98))
+        peito_y = nariz_y + larg_ombros * float(rng.uniform(0.45, 0.88))
         m_b = escolher_molde_par(rng, "B_ines", "B_pdf", misturar=True)
-        if variante < 0.40:
+        if variante < 0.42:
             px = nariz_x + sinal_dir * float(rng.uniform(0.02, 0.14))
-            desl_x = sinal_dir * float(rng.uniform(0.05, 0.14))
+            desl_x = sinal_dir * float(rng.uniform(0.06, 0.16))
             cfg.update(
                 molde_ini=m_b,
                 molde_fim=m_b,
-                rot_ini=float(rng.uniform(-2.0, 14.0)) * sinal_dir,
-                rot_fim=float(rng.uniform(2.0, 16.0)) * sinal_dir,
+                rot_ini=float(rng.uniform(-6.0, 18.0)) * sinal_dir,
+                rot_fim=float(rng.uniform(2.0, 22.0)) * sinal_dir,
                 pos_ini=(px, peito_y),
-                pos_fim=(px + desl_x, peito_y + float(rng.uniform(-0.02, 0.05))),
-                osc_x=float(rng.uniform(0.015, 0.045)),
+                pos_fim=(px + desl_x, peito_y + float(rng.uniform(-0.04, 0.06))),
+                osc_x=float(rng.uniform(0.020, 0.055)),
+                osc_y=float(rng.uniform(0.015, 0.045)),
                 ancorado=True,
                 segunda_mao={
                     "molde": m_b,
-                    "pos_ini": (px + sinal_dir * float(rng.uniform(0.07, 0.13)), peito_y + float(rng.uniform(0.05, 0.10))),
-                    "pos_fim": (px + desl_x + sinal_dir * float(rng.uniform(0.07, 0.13)), peito_y + float(rng.uniform(0.05, 0.11))),
-                    "rot_ini": float(rng.uniform(-62.0, -35.0)) * sinal_dir,
-                    "rot_fim": float(rng.uniform(-58.0, -30.0)) * sinal_dir,
+                    "pos_ini": (px + sinal_dir * float(rng.uniform(0.10, 0.22)), peito_y + float(rng.uniform(0.04, 0.12))),
+                    "pos_fim": (px + desl_x + sinal_dir * float(rng.uniform(0.10, 0.22)), peito_y + float(rng.uniform(0.04, 0.12))),
+                    "rot_ini": float(rng.uniform(-75.0, -30.0)) * sinal_dir,
+                    "rot_fim": float(rng.uniform(-70.0, -25.0)) * sinal_dir,
                     "lado": -lado,
                 },
             )
-        elif variante < 0.80:
+        elif variante < 0.84:
             m_a = escolher_molde_par(rng, "A_ines", "A_pdf", misturar=True)
-            px = nariz_x - sinal_dir * float(rng.uniform(0.02, 0.08))
-            py_a = nariz_y + larg_ombros * float(rng.uniform(0.52, 0.72))
-            desl_x = -sinal_dir * float(rng.uniform(0.05, 0.15))
+            px = nariz_x - sinal_dir * float(rng.uniform(0.02, 0.10))
+            py_a = nariz_y + larg_ombros * float(rng.uniform(0.42, 0.72))
+            desl_x = -sinal_dir * float(rng.uniform(0.06, 0.16))
             cfg.update(
                 molde_ini=m_a,
                 molde_fim=m_a,
-                rot_ini=float(rng.uniform(8.0, 22.0)) * sinal_dir,
-                rot_fim=float(rng.uniform(10.0, 24.0)) * sinal_dir,
+                rot_ini=float(rng.uniform(6.0, 24.0)) * sinal_dir,
+                rot_fim=float(rng.uniform(8.0, 26.0)) * sinal_dir,
                 pos_ini=(px, py_a + 0.02),
-                pos_fim=(px + desl_x, py_a - 0.01),
-                osc_x=float(rng.uniform(0.015, 0.040)),
+                pos_fim=(px + desl_x, py_a - 0.02),
+                osc_x=float(rng.uniform(0.020, 0.055)),
+                osc_y=float(rng.uniform(0.015, 0.045)),
                 ancorado=True,
                 segunda_mao={
-                    "molde": m_a if rng.random() < 0.5 else m_b,
-                    "pos_ini": (px + sinal_dir * float(rng.uniform(0.07, 0.12)), py_a + float(rng.uniform(0.05, 0.09))),
-                    "pos_fim": (px + desl_x + sinal_dir * float(rng.uniform(0.09, 0.16)), py_a + float(rng.uniform(0.04, 0.09))),
-                    "rot_ini": float(rng.uniform(-18.0, -4.0)) * sinal_dir,
-                    "rot_fim": float(rng.uniform(-16.0, -2.0)) * sinal_dir,
+                    "molde": m_a if rng.random() < 0.45 else m_b,
+                    "pos_ini": (px + sinal_dir * float(rng.uniform(0.10, 0.20)), py_a + float(rng.uniform(0.05, 0.12))),
+                    "pos_fim": (px + desl_x + sinal_dir * float(rng.uniform(0.10, 0.22)), py_a + float(rng.uniform(0.04, 0.12))),
+                    "rot_ini": float(rng.uniform(-35.0, -4.0)) * sinal_dir,
+                    "rot_fim": float(rng.uniform(-32.0, -2.0)) * sinal_dir,
                     "lado": -lado,
                 },
             )
@@ -657,6 +803,19 @@ def gerar_amostra_temporal(sinal, rng, lado=1.0, incluir_pose=True):
         and sinal in ("CASA", "POR FAVOR")
         and rng.random() < 0.45
     )
+
+    # Em 18% dos sinais unimanuais, simula a outra mao visivel em repouso na parte inferior
+    if cfg["segunda_mao"] is None and sinal != "NEUTRO" and rng.random() < 0.18:
+        rep_x = nariz_x + (1.0 if lado > 0 else -1.0) * float(rng.uniform(0.16, 0.30))
+        rep_y = min(0.94, nariz_y + larg_ombros * float(rng.uniform(1.10, 1.45)))
+        cfg["segunda_mao"] = {
+            "molde": interpolar_molde("C_ines", "O_ines", float(rng.uniform(0.0, 0.5))),
+            "pos_ini": (rep_x, rep_y),
+            "pos_fim": (rep_x, rep_y),
+            "rot_ini": float(rng.uniform(-160.0, -110.0)) * (1.0 if lado > 0 else -1.0),
+            "rot_fim": float(rng.uniform(-160.0, -110.0)) * (1.0 if lado > 0 else -1.0),
+            "lado": -lado,
+        }
 
     quadros = []
     for t in range(total_quadros):
@@ -731,8 +890,8 @@ def gerar_amostra_temporal(sinal, rng, lado=1.0, incluir_pose=True):
 
 def criar_dataset():
     sinais = [
-        "OI", "BOM DIA", "OBRIGADO", "POR FAVOR",
-        "SIM", "NAO", "EU", "VOCE", "CASA", "AJUDA",
+        "OI", "BOM", "DIA_ROSTO", "DIA_SOL", "OBRIGADO", "POR FAVOR",
+        "SIM", "NAO", "EU", "VOCE", "CASA", "AJUDA", "NEUTRO",
         "A", "B", "C", "D", "E", "F", "I", "L", "O", "U", "V", "W", "Y",
     ]
     rng = np.random.default_rng(42)
@@ -743,9 +902,18 @@ def criar_dataset():
     linhas = [cabecalho]
 
     for sinal in sinais:
-        qtd = 110 if sinal in ("OI", "BOM DIA", "AJUDA", "NAO", "CASA", "POR FAVOR") else amostras_por_configuracao
-        ancorado_rosto = sinal in ("OBRIGADO", "BOM DIA", "EU", "VOCE")
-        ancorado_peito = sinal in ("CASA", "POR FAVOR", "AJUDA")
+        if sinal == "NEUTRO":
+            qtd = 55
+        elif sinal == "DIA_ROSTO":
+            qtd = 60
+        elif sinal == "DIA_SOL":
+            qtd = 50
+        elif sinal in ("OI", "BOM", "AJUDA", "NAO", "CASA", "POR FAVOR"):
+            qtd = 100
+        else:
+            qtd = amostras_por_configuracao
+        ancorado_rosto = sinal in ("OBRIGADO", "BOM", "DIA_ROSTO", "EU", "VOCE", "NEUTRO")
+        ancorado_peito = sinal in ("CASA", "POR FAVOR", "AJUDA", "DIA_SOL")
         for lado in (1.0, -1.0):
             for idx_amostra in range(qtd * 2):
                 if ancorado_rosto:
