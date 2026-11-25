@@ -4,13 +4,99 @@ import { useCameraPermissions } from 'expo-camera';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import LibrasNativeCamera from './modules/libras-native';
 import modeloLocal from './assets/modelo_libras_mobile.json';
+import modeloApresentacao from './assets/modelo_apresentacao_mobile.json';
 
 const JANELA_TEMPORAL_MS = 1100;
 const JANELA_COMPOSICAO_MS = 2800;
+const JANELA_COMPOSICAO_LONGA_MS = 3500;
+const COOLDOWN_PALAVRA_MS = 4500;
+const COOLDOWN_LETRA_MS = 1600;
+const JANELA_CONTEXTO_COMPOSTO_MS = 4500;
+const JANELA_CONTEXTO_FRASE_MS = 9000;
 const MAPA_SUBCLASSES = {
   DIA_ROSTO: 'DIA',
   DIA_SOL: 'DIA',
+  '2_HORIZ': '2',
+  '2_VERT': '2',
 };
+
+const TRANSICOES_COMPOSTO = {
+  BOM: ['DIA', 'D'],
+  LIBRAS: ['2'],
+  '2': ['TEXTO'],
+  LIBRAS2: ['TEXTO'],
+  TEMPO: ['REAL'],
+};
+
+const TRANSICOES_APRESENTACAO = {
+  '': ['BOM'],
+  DIA: ['LIBRAS'],
+  'BOM DIA': ['LIBRAS'],
+  TEXTO: ['APLICATIVO'],
+  LIBRAS2TEXT: ['APLICATIVO'],
+  APLICATIVO: ['TRADUZIR'],
+  TRADUZIR: ['TEMPO'],
+  REAL: ['TRANSFORMAR'],
+  'TEMPO REAL': ['TRANSFORMAR'],
+  TRANSFORMAR: ['INOVACAO'],
+  INOVACAO: ['ACESSIBILIDADE'],
+};
+
+const TRANSICOES_GERAL = {
+  OI: ['BOM', 'EU', 'VOCE'],
+  'BOM DIA': ['EU', 'VOCE', 'POR FAVOR', 'AJUDA'],
+  EU: ['AJUDA', 'POR FAVOR', 'OBRIGADO', 'CASA'],
+  VOCE: ['AJUDA', 'POR FAVOR', 'OBRIGADO', 'CASA'],
+  'POR FAVOR': ['AJUDA', 'OBRIGADO'],
+  AJUDA: ['POR FAVOR', 'OBRIGADO'],
+};
+
+function extrairUltimoTokenContexto(texto) {
+  const limpo = (texto || '').trim();
+  if (!limpo) return '';
+  for (const composto of ['BOM DIA', 'TEMPO REAL', 'POR FAVOR']) {
+    if (limpo === composto || limpo.endsWith(` ${composto}`)) {
+      return composto;
+    }
+  }
+  const partes = limpo.split(/\s+/);
+  return partes[partes.length - 1] || '';
+}
+
+function tentarSubstituirSufixo(anterior, alvos, substituto) {
+  const semEspacoFim = anterior.trimEnd();
+  for (const alvo of alvos) {
+    if (semEspacoFim === alvo) {
+      return substituto;
+    }
+    if (semEspacoFim.endsWith(` ${alvo}`)) {
+      return `${semEspacoFim.slice(0, -(alvo.length + 1))} ${substituto}`;
+    }
+  }
+  return null;
+}
+
+function tentarCompostoGravado(rotuloFinal, partes, somaMinima) {
+  if (partes.some((p) => !p || p.contagem < 2)) {
+    return null;
+  }
+  for (let i = 0; i < partes.length - 1; i += 1) {
+    if (partes[i].primeiroInstante > partes[i + 1].ultimoInstante) {
+      return null;
+    }
+  }
+  const soma = partes.reduce((acc, p) => acc + p.soma, 0);
+  if (soma < somaMinima) {
+    return null;
+  }
+  const somaConf = partes.reduce((acc, p) => acc + p.somaConf, 0);
+  const contagem = partes.reduce((acc, p) => acc + p.contagem, 0);
+  const maxConf = Math.max(...partes.map((p) => p.maxConf));
+  return {
+    rotulo: rotuloFinal,
+    reg: { soma, somaConf, contagem, maxConf },
+  };
+}
 
 function limitar(valor, minimo, maximo) {
   return Math.max(minimo, Math.min(maximo, valor));
@@ -357,7 +443,7 @@ function montarVetorTemporal(historico) {
   return vetorBase.concat([absDx, dy, ampX, ampY, energiaX, energiaY, energiaTotal], deltaDedos);
 }
 
-function preverModeloLocal(modelo, caracteristicas) {
+function preverModeloLocal(modelo, caracteristicas, opcoesContexto = null) {
   if (!modelo || caracteristicas.length !== modelo.quantidade_caracteristicas) {
     return { previsao: '', confianca: 0 };
   }
@@ -386,20 +472,64 @@ function preverModeloLocal(modelo, caracteristicas) {
     agrupadas.set(rotuloExib, (agrupadas.get(rotuloExib) || 0) + prob);
   }
 
-  let melhorRotulo = '';
-  let melhorProb = 0;
-  for (const [rotulo, prob] of agrupadas.entries()) {
-    if (prob > melhorProb) {
-      melhorRotulo = rotulo;
-      melhorProb = prob;
-    }
-  }
-  if (melhorRotulo === 'NEUTRO') {
+  const probNeutro = agrupadas.get('NEUTRO') || 0;
+  agrupadas.delete('NEUTRO');
+
+  const ordenados = Array.from(agrupadas.entries()).sort((a, b) => b[1] - a[1]);
+  if (ordenados.length === 0 || probNeutro >= ordenados[0][1]) {
     return { previsao: '', confianca: 0 };
   }
+
+  const top1Prob = ordenados[0][1];
+  let melhorRotulo = ordenados[0][0];
+  let melhorConf = top1Prob;
+  let melhorPontuacao = top1Prob;
+
+  if (opcoesContexto) {
+    const { token = '', idadeMs = 0, modo = 'geral' } = opcoesContexto;
+    let esperados = null;
+    let bonus = 0;
+    let margemMax = 0;
+    let tetoTop1 = 0;
+    let pisoVisual = 0;
+
+    if ((modo === 'apresentacao' || token === 'BOM') && idadeMs <= JANELA_CONTEXTO_COMPOSTO_MS && TRANSICOES_COMPOSTO[token]) {
+      esperados = TRANSICOES_COMPOSTO[token];
+      bonus = 0.11;
+      margemMax = 0.12;
+      tetoTop1 = 0.52;
+      pisoVisual = 0.14;
+    } else if (modo === 'apresentacao' && (token === '' || idadeMs <= JANELA_CONTEXTO_FRASE_MS) && TRANSICOES_APRESENTACAO[token]) {
+      esperados = TRANSICOES_APRESENTACAO[token];
+      bonus = 0.08;
+      margemMax = 0.09;
+      tetoTop1 = 0.48;
+      pisoVisual = 0.14;
+    } else if (modo === 'geral' && token !== '' && idadeMs <= JANELA_CONTEXTO_FRASE_MS && TRANSICOES_GERAL[token]) {
+      esperados = TRANSICOES_GERAL[token];
+      bonus = 0.08;
+      margemMax = 0.09;
+      tetoTop1 = 0.48;
+      pisoVisual = 0.15;
+    }
+
+    if (esperados && top1Prob < tetoTop1) {
+      for (const [rotulo, prob] of ordenados.slice(0, 3)) {
+        if (esperados.includes(rotulo) && prob >= pisoVisual && (top1Prob - prob) <= margemMax) {
+          const pontuacao = prob + bonus;
+          if (pontuacao > melhorPontuacao) {
+            melhorPontuacao = pontuacao;
+            melhorRotulo = rotulo;
+            melhorConf = Math.min(1.0, prob + bonus * 0.75);
+          }
+        }
+      }
+    }
+  }
+
   return {
     previsao: melhorRotulo,
-    confianca: melhorProb,
+    confianca: melhorConf,
   };
 }
 
@@ -446,9 +576,14 @@ function AplicativoPrincipal() {
   const [gravandoGesto, setGravandoGesto] = useState(false);
   const [tempoGestoRestante, setTempoGestoRestante] = useState(0);
   const [contagemRegressiva, setContagemRegressiva] = useState(0);
+  const [modoModelo, setModoModelo] = useState('geral');
 
   const capturandoRef = useRef(true);
   const trocandoCameraRef = useRef(false);
+  const modoModeloRef = useRef('geral');
+  const textoCompletoRef = useRef('');
+  const contextoRecenteRef = useRef({ token: '', instante: 0 });
+  const temposInsercaoRef = useRef({});
   const ultimaLetraRef = useRef('');
   const ultimoSinalInseridoRef = useRef('');
   const contagemEstavelRef = useRef(0);
@@ -488,12 +623,38 @@ function AplicativoPrincipal() {
     ultimaLetraRef.current = '';
     ultimoSinalInseridoRef.current = '';
     contagemEstavelRef.current = 0;
-    if (limparComposicao || ultimoSinalComposicaoRef.current.rotulo !== 'BOM') {
+    if (
+      limparComposicao ||
+      !['BOM', 'TEMPO', 'LIBRAS', 'LIBRAS2'].includes(ultimoSinalComposicaoRef.current.rotulo)
+    ) {
       ultimoSinalComposicaoRef.current = { rotulo: '', instante: 0 };
     }
   }
 
-  function adicionarAoTexto(sinal) {
+  function atualizarTextoCompleto(novoTexto) {
+    textoCompletoRef.current = novoTexto;
+    setTextoCompleto(novoTexto);
+    const limpo = novoTexto.trim();
+    contextoRecenteRef.current = {
+      token: extrairUltimoTokenContexto(novoTexto),
+      instante: limpo ? Date.now() : 0,
+    };
+  }
+
+  function alterarModoModelo(novoModo) {
+    if (novoModo === modoModeloRef.current) return;
+    if (gravandoGestoRef.current || preparandoGestoRef.current) return;
+    modoModeloRef.current = novoModo;
+    setModoModelo(novoModo);
+    limparHistoricoPredicao(true);
+    contextoRecenteRef.current = { token: '', instante: 0 };
+    temposInsercaoRef.current = {};
+    setLetraAtual('-');
+    setConfianca(0);
+    setQuadrosBuffer(0);
+  }
+
+  function adicionarAoTexto(sinal, forcarManual = false) {
     if (
       !sinal ||
       sinal === '-' ||
@@ -506,37 +667,75 @@ function AplicativoPrincipal() {
       return;
     }
 
-    setTextoCompleto((anterior) => {
-      const textoLimpo = anterior.trim();
-      if (!textoLimpo) {
-        return sinal;
+    const anterior = textoCompletoRef.current;
+    const agora = Date.now();
+    const ehPalavra = sinal.length > 1 || sinal === '2';
+
+    if (!anterior.trim()) {
+      atualizarTextoCompleto(sinal);
+      temposInsercaoRef.current[sinal] = agora;
+      ultimoSinalInseridoRef.current = sinal;
+      return;
+    }
+
+    let substituto = null;
+    if (sinal === 'BOM DIA') {
+      substituto = tentarSubstituirSufixo(anterior, ['BOM'], 'BOM DIA');
+    } else if (modoModeloRef.current === 'apresentacao') {
+      if (sinal === 'TEMPO REAL') {
+        substituto = tentarSubstituirSufixo(anterior, ['TEMPO'], 'TEMPO REAL');
+      } else if (sinal === 'LIBRAS2' || sinal === '2') {
+        substituto = tentarSubstituirSufixo(anterior, ['LIBRAS'], 'LIBRAS2');
+      } else if (sinal === 'LIBRAS2TEXT') {
+        substituto = tentarSubstituirSufixo(anterior, ['LIBRAS2', 'LIBRAS'], 'LIBRAS2TEXT');
+      } else if (sinal === 'TEXTO') {
+        substituto = tentarSubstituirSufixo(anterior, ['LIBRAS2'], 'LIBRAS2TEXT');
       }
-      if (sinal === 'BOM DIA') {
-        const semEspacoFim = anterior.trimEnd();
-        if (semEspacoFim === 'BOM') {
-          return 'BOM DIA';
-        }
-        if (semEspacoFim.endsWith(' BOM')) {
-          return `${semEspacoFim.slice(0, -4)} BOM DIA`;
-        }
+    }
+
+    if (substituto) {
+      atualizarTextoCompleto(substituto);
+      const tokenFinal = extrairUltimoTokenContexto(substituto);
+      if (tokenFinal) temposInsercaoRef.current[tokenFinal] = agora;
+      ultimoSinalInseridoRef.current = sinal;
+      return;
+    }
+
+    if (!forcarManual) {
+      const ultimoTok = extrairUltimoTokenContexto(anterior);
+      const ultimoTempo = temposInsercaoRef.current[sinal] || 0;
+      if (ehPalavra && ultimoTok === sinal) {
+        return;
       }
-      if (sinal.length > 1 || anterior.endsWith(' ')) {
-        return anterior.endsWith(' ') ? anterior + sinal : `${anterior} ${sinal}`;
+      if (ehPalavra && agora - ultimoTempo < COOLDOWN_PALAVRA_MS) {
+        return;
       }
-      return anterior + sinal;
-    });
+      if (!ehPalavra && anterior.trimEnd().endsWith(sinal) && agora - ultimoTempo < COOLDOWN_LETRA_MS) {
+        return;
+      }
+    }
+
+    const novoTexto = (ehPalavra || anterior.endsWith(' '))
+      ? (anterior.endsWith(' ') ? anterior + sinal : `${anterior} ${sinal}`)
+      : anterior + sinal;
+    atualizarTextoCompleto(novoTexto);
+    temposInsercaoRef.current[sinal] = agora;
+    ultimoSinalInseridoRef.current = sinal;
   }
 
   function apagarUltimo() {
-    setTextoCompleto((anterior) => {
-      if (!anterior) return '';
+    const anterior = textoCompletoRef.current;
+    let novoTexto = '';
+    if (anterior) {
       const texto = anterior.trimEnd();
       const ultimoEspaco = texto.lastIndexOf(' ');
-      if (ultimoEspaco === -1) {
-        return '';
+      if (ultimoEspaco !== -1) {
+        novoTexto = texto.substring(0, ultimoEspaco);
       }
-      return texto.substring(0, ultimoEspaco);
-    });
+    }
+    atualizarTextoCompleto(novoTexto);
+    ultimoSinalInseridoRef.current = '';
+    temposInsercaoRef.current = {};
   }
 
   function receberQuadroLocal(evento) {
@@ -642,9 +841,33 @@ function AplicativoPrincipal() {
     const menorY = Math.min(...trilhasAtivas.map((t) => t.centro[1]));
     const maiorY = Math.max(...trilhasAtivas.map((t) => t.centro[1]));
 
+    const modoAtual = modoModeloRef.current;
+    const modeloAtivo = modoAtual === 'apresentacao' ? modeloApresentacao : modeloLocal;
+
+    let tokenContexto = contextoRecenteRef.current.token;
+    let idadeContextoMs = contextoRecenteRef.current.instante
+      ? agoraMs - contextoRecenteRef.current.instante
+      : 0;
+    if (
+      !gravandoGestoRef.current &&
+      ['BOM', 'TEMPO', 'LIBRAS', 'LIBRAS2'].includes(ultimoSinalComposicaoRef.current.rotulo)
+    ) {
+      tokenContexto = ultimoSinalComposicaoRef.current.rotulo;
+      idadeContextoMs = agoraMs - ultimoSinalComposicaoRef.current.instante;
+    } else if (gravandoGestoRef.current) {
+      if (acumuladorGestoRef.current.BOM?.contagem >= 2) {
+        tokenContexto = 'BOM';
+        idadeContextoMs = 0;
+      } else if (modoAtual === 'apresentacao' && acumuladorGestoRef.current.TEMPO?.contagem >= 2) {
+        tokenContexto = 'TEMPO';
+        idadeContextoMs = 0;
+      }
+    }
+    const opcoesContexto = { token: tokenContexto, idadeMs: idadeContextoMs, modo: modoAtual };
+
     const avaliacoes = trilhasAtivas.map((trilha) => {
       const caracteristicas = montarVetorTemporal(trilha.quadros);
-      const res = preverModeloLocal(modeloLocal, caracteristicas);
+      const res = preverModeloLocal(modeloAtivo, caracteristicas, opcoesContexto);
       const emMov = caracteristicas[104] >= 0.28 || Math.max(caracteristicas[100], caracteristicas[101]) >= 0.24;
       let prioridade = res.confianca;
       if (trilhasAtivas.length > 1) {
@@ -696,6 +919,7 @@ function AplicativoPrincipal() {
 
     if (!gravandoGestoRef.current && predicao) {
       const ultimoComp = ultimoSinalComposicaoRef.current;
+      const ehApres = modoModeloRef.current === 'apresentacao';
       if (predicao === 'BOM') {
         ultimoSinalComposicaoRef.current = { rotulo: 'BOM', instante: agoraMs };
       } else if (
@@ -707,6 +931,40 @@ function AplicativoPrincipal() {
       ) {
         predicao = 'BOM DIA';
         ultimoSinalComposicaoRef.current = { rotulo: 'BOM_DIA', instante: ultimoComp.instante };
+      } else if (ehApres && predicao === 'TEMPO') {
+        ultimoSinalComposicaoRef.current = { rotulo: 'TEMPO', instante: agoraMs };
+      } else if (
+        ehApres &&
+        predicao === 'REAL' &&
+        (
+          ultimoComp.rotulo === 'TEMPO_REAL' ||
+          (ultimoComp.rotulo === 'TEMPO' && agoraMs - ultimoComp.instante <= JANELA_COMPOSICAO_MS)
+        )
+      ) {
+        predicao = 'TEMPO REAL';
+        ultimoSinalComposicaoRef.current = { rotulo: 'TEMPO_REAL', instante: ultimoComp.instante };
+      } else if (ehApres && predicao === 'LIBRAS') {
+        ultimoSinalComposicaoRef.current = { rotulo: 'LIBRAS', instante: agoraMs };
+      } else if (
+        ehApres &&
+        predicao === '2' &&
+        (
+          ultimoComp.rotulo === 'LIBRAS2' ||
+          (ultimoComp.rotulo === 'LIBRAS' && agoraMs - ultimoComp.instante <= JANELA_COMPOSICAO_LONGA_MS)
+        )
+      ) {
+        predicao = 'LIBRAS2';
+        ultimoSinalComposicaoRef.current = { rotulo: 'LIBRAS2', instante: agoraMs };
+      } else if (
+        ehApres &&
+        predicao === 'TEXTO' &&
+        (
+          ultimoComp.rotulo === 'LIBRAS2TEXT' ||
+          (ultimoComp.rotulo === 'LIBRAS2' && agoraMs - ultimoComp.instante <= JANELA_COMPOSICAO_LONGA_MS)
+        )
+      ) {
+        predicao = 'LIBRAS2TEXT';
+        ultimoSinalComposicaoRef.current = { rotulo: 'LIBRAS2TEXT', instante: ultimoComp.instante };
       } else if (ultimoComp.rotulo) {
         ultimoSinalComposicaoRef.current = { rotulo: '', instante: 0 };
       }
@@ -754,7 +1012,7 @@ function AplicativoPrincipal() {
     } else if (!gravandoGestoRef.current && !predicao) {
       ultimaLetraRef.current = '';
       contagemEstavelRef.current = 0;
-      if (ultimoSinalComposicaoRef.current.rotulo === 'BOM_DIA') {
+      if (['BOM_DIA', 'TEMPO_REAL', 'LIBRAS2TEXT'].includes(ultimoSinalComposicaoRef.current.rotulo)) {
         ultimoSinalComposicaoRef.current = { rotulo: '', instante: 0 };
       }
     }
@@ -822,38 +1080,44 @@ function AplicativoPrincipal() {
         const regBom = acumulador.BOM;
         const regDia = acumulador.DIA && acumulador.D
           ? {
+            soma: acumulador.DIA.soma + acumulador.D.soma,
             somaConf: acumulador.DIA.somaConf + acumulador.D.somaConf,
             contagem: acumulador.DIA.contagem + acumulador.D.contagem,
             maxConf: Math.max(acumulador.DIA.maxConf, acumulador.D.maxConf),
+            primeiroInstante: Math.min(acumulador.DIA.primeiroInstante, acumulador.D.primeiroInstante),
             ultimoInstante: Math.max(acumulador.DIA.ultimoInstante, acumulador.D.ultimoInstante),
           }
           : (acumulador.DIA || acumulador.D);
-        let melhorRotulo = '';
-        let melhorReg = null;
 
-        if (
-          regBom &&
-          regDia &&
-          regBom.primeiroInstante <= regDia.ultimoInstante &&
-          (regBom.contagem >= 2 || regBom.maxConf >= 0.42) &&
-          (regDia.contagem >= 2 || regDia.maxConf >= 0.42)
-        ) {
-          melhorRotulo = 'BOM DIA';
-          melhorReg = {
-            somaConf: regBom.somaConf + regDia.somaConf,
-            contagem: regBom.contagem + regDia.contagem,
-            maxConf: Math.max(regBom.maxConf, regDia.maxConf),
-          };
-        } else {
-          for (const [rotulo, reg] of Object.entries(acumulador)) {
-            const valido = reg.contagem >= 2 || reg.maxConf >= 0.48;
-            if (!valido) continue;
-            if (!melhorReg || reg.soma > melhorReg.soma) {
-              melhorRotulo = rotulo;
-              melhorReg = reg;
-            }
+        let melhorIndRotulo = '';
+        let melhorIndReg = null;
+        for (const [rotulo, reg] of Object.entries(acumulador)) {
+          const valido = reg.contagem >= 2 || reg.maxConf >= 0.48;
+          if (!valido) continue;
+          if (!melhorIndReg || reg.soma > melhorIndReg.soma) {
+            melhorIndRotulo = rotulo;
+            melhorIndReg = reg;
           }
         }
+
+        const somaMinimaComp = 0.95 * (melhorIndReg ? melhorIndReg.soma : 0);
+        const candidatos = [['BOM DIA', [regBom, regDia]]];
+        if (modoModeloRef.current === 'apresentacao') {
+          candidatos.unshift(['LIBRAS2TEXT', [acumulador.LIBRAS, acumulador['2'], acumulador.TEXTO]]);
+          candidatos.push(['LIBRAS2', [acumulador.LIBRAS, acumulador['2']]]);
+          candidatos.push(['TEMPO REAL', [acumulador.TEMPO, acumulador.REAL]]);
+        }
+
+        let composto = null;
+        for (const [rotuloFinal, partes] of candidatos) {
+          composto = tentarCompostoGravado(rotuloFinal, partes, somaMinimaComp);
+          if (composto) break;
+        }
+
+        const melhorRotulo = composto ? composto.rotulo : melhorIndRotulo;
+        const melhorReg = composto ? composto.reg : melhorIndReg;
+        historicoLocalRef.current = [];
+        votacoesModeloRef.current = [];
         if (melhorRotulo && melhorReg) {
           const confFinal = Math.max(melhorReg.somaConf / melhorReg.contagem, melhorReg.maxConf * 0.9);
           adicionarAoTexto(melhorRotulo);
@@ -881,14 +1145,15 @@ function AplicativoPrincipal() {
   }
 
   function limparTexto() {
-    setTextoCompleto('');
+    atualizarTextoCompleto('');
+    temposInsercaoRef.current = {};
     setLetraAtual('-');
     setConfianca(0);
     limparHistoricoPredicao();
   }
 
   function adicionarEspaco() {
-    setTextoCompleto((anterior) => `${anterior} `);
+    atualizarTextoCompleto(`${textoCompletoRef.current} `);
   }
 
   if (!permissao) {
@@ -921,12 +1186,34 @@ function AplicativoPrincipal() {
         <View style={estilos.cabecalho}>
           <Text style={estilos.titulo}>Tradutor de Libras</Text>
           <View style={estilos.linhaStatus}>
-            <Text style={estilos.rotuloStatus}>Modo: Local Offline</Text>
+            <Text style={estilos.rotuloStatus}>
+              Modo: {modoModelo === 'apresentacao' ? 'Apresentacao (Offline)' : 'Geral (Offline)'}
+            </Text>
             <Text style={estilos.rotuloStatus}>Buffer: {quadrosBuffer}/9 quadros</Text>
           </View>
           <View style={estilos.linhaStatus}>
             <Text style={estilos.rotuloStatus}>Inferencia: {tempoInferencia} ms</Text>
             <Text style={estilos.rotuloStatus}>Camera: {cameraPronta ? (tipoCamera === 'front' ? 'Frontal' : 'Traseira') : 'Iniciando...'}</Text>
+          </View>
+          <View style={estilos.linhaModo}>
+            <TouchableOpacity
+              style={[estilos.botaoModo, modoModelo === 'geral' ? estilos.botaoModoAtivo : null]}
+              onPress={() => alterarModoModelo('geral')}
+              disabled={contagemRegressiva > 0 || gravandoGesto}
+            >
+              <Text style={[estilos.textoBotaoModo, modoModelo === 'geral' ? estilos.textoBotaoModoAtivo : null]}>
+                Modo Geral
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[estilos.botaoModo, modoModelo === 'apresentacao' ? estilos.botaoModoAtivo : null]}
+              onPress={() => alterarModoModelo('apresentacao')}
+              disabled={contagemRegressiva > 0 || gravandoGesto}
+            >
+              <Text style={[estilos.textoBotaoModo, modoModelo === 'apresentacao' ? estilos.textoBotaoModoAtivo : null]}>
+                Modo Apresentacao
+              </Text>
+            </TouchableOpacity>
           </View>
         </View>
 
@@ -1011,7 +1298,7 @@ function AplicativoPrincipal() {
           <View style={estilos.linhaBotoes}>
             <TouchableOpacity
               style={estilos.botaoAcao}
-              onPress={() => adicionarAoTexto(letraAtual)}
+              onPress={() => adicionarAoTexto(letraAtual, true)}
             >
               <Text style={estilos.textoBotaoAcao}>+ Frase</Text>
             </TouchableOpacity>
@@ -1245,5 +1532,31 @@ const estilos = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600',
     textAlign: 'center',
+  },
+  linhaModo: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 8,
+  },
+  botaoModo: {
+    flex: 1,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#D1D5DB',
+    paddingVertical: 8,
+    borderRadius: 6,
+    alignItems: 'center',
+  },
+  botaoModoAtivo: {
+    backgroundColor: '#111827',
+    borderColor: '#111827',
+  },
+  textoBotaoModo: {
+    color: '#374151',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  textoBotaoModoAtivo: {
+    color: '#FFFFFF',
   },
 });

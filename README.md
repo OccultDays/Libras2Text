@@ -156,9 +156,10 @@ Caso faca alteracoes no codigo do aplicativo ou no modelo:
 - **Android SDK** configurado (variavel `ANDROID_HOME` ou arquivo `aplicativo/android/local.properties` com `sdk.dir`)
 
 ### Passos de compilacao
-1. (Opcional) Retreinar e exportar o modelo local:
+1. (Opcional) Retreinar e exportar os modelos locais:
    ```bash
    python modelo/treinar_modelo.py
+   python modelo/treinar_apresentacao.py --treinar
    ```
 
 2. Instalar as dependencias do JavaScript:
@@ -185,8 +186,8 @@ Caso faca alteracoes no codigo do aplicativo ou no modelo:
 
 ## 8. Funcionamento da Interface
 
-- **Cabecalho**: exibe o status de operacao ("Modo: Local Offline"), a contagem do buffer temporal (ate 9 quadros), o tempo total de inferencia em ms e a camera ativa.
-- **Area de Video**: visualizacao da camera em formato 3:4 com o line tracing em `Canvas` nativo desenhado sobre as maos.
+- **Cabecalho**: exibe o status do modelo ativo ("Modo: Geral (Offline)" ou "Modo: Apresentacao (Offline)"), os dois botoes de alternancia (`Modo Geral` e `Modo Apresentacao`), a contagem do buffer temporal (ate 9 quadros), o tempo total de inferencia em ms e a camera ativa.
+- **Area de Video**: visualizacao da camera em formato 3:4 (`360x480`) com o line tracing em `Canvas` nativo desenhado sobre as maos.
 - **Painel de Traducao**: mostra o sinal reconhecido em destaque, o percentual de confianca e o texto acumulado.
 - **Botoes de Acao**:
   - `Gravar Gesto Longo (2.5s)`: contagem regressiva de 3 s e captura focada de 2,5 s com pontuacao acumulada para sinais com movimento.
@@ -197,11 +198,25 @@ Caso faca alteracoes no codigo do aplicativo ou no modelo:
   - `Limpar`: limpa todo o texto acumulado.
   - `Trocar Camera`: alterna entre camera frontal e traseira.
 
+### Modo Apresentacao (Frase Completa)
+
+Alem do vocabulario geral (`aplicativo/assets/modelo_libras_mobile.json`), o aplicativo conta com o **Modo Apresentacao** (`aplicativo/assets/modelo_apresentacao_mobile.json`, 6,40 MB, 90 arvores, 15 classes internas), treinado especificamente com janelas reais curadas visualmente (6.596 amostras em `modelo/dataset_apresentacao_reais.csv`) das bases INES, V-LIBRASIL/UFPE, Glossario Letras-Libras UFSC, SignBank UFSC, SpreadTheSign, MALTA-LIBRAS e clipes educacionais do YouTube, mais suporte sintatico para composicao automatica:
+
+- **Frase alvo em Libras**: `BOM DIA` (`BOM` + `DIA`) · `LIBRAS2TEXT` (`LIBRAS` + `2` + `TEXTO`) · `APLICATIVO` · `TRADUZIR` · `TEMPO REAL` (`TEMPO` + `REAL`) · `TRANSFORMAR` · `INOVACAO` (sinal oficial `NOVIDADE`) · `ACESSIBILIDADE` (`NEUTRO` suprimido na exibicao).
+- **Validacao real sem vazamento (`modelo/treinar_apresentacao.py --validar-lovo --recorte-celular` em `360x480`)**: **58/64 (90,6%)** no modo *Gravar Gesto (2.5s)* e **58/64 (90,6%)** na maioria das janelas (`93,8%` com o sinal correto em pelo menos 1 janela), destacando **100%** em `BOM` (4/4), `BOM DIA` (1/1), `DIA_ROSTO` (5/5), `LIBRAS` (7/7), `2_HORIZ` (4/4), `2_VERT` (3/3), `APLICATIVO` (2/2), `TEMPO` (6/6), `TRANSFORMAR` (4/4) e `ACESSIBILIDADE` (3/3).
+
+### Sistema de Compensacao Offline (Anti-Repeticao e Contexto)
+
+Para reduzir oscilacoes e repeticoes sem depender de IA online nem engessar sinais fora de ordem:
+
+- **Bloqueio anti-repeticao no `App.js`**: impede repetir a mesma palavra consecutivamente ou em oscilacao `A -> B -> A` dentro de `4,5 s` (e `1,6 s` para a mesma letra no mesmo final de palavra), liberando sempre que o usuario apertar `+ Frase` ou usar `Apagar`.
+- **Desempate contextual das Top-3 probabilidades (`preverModeloLocal`)**: aplica um bonus leve em margem estreita apenas quando `NEUTRO` nao venceu e o candidato esperado ja aparece entre os 3 primeiros com piso minimo visual (`0,14`–`0,15`), usando janela de `4,5 s` para sinais compostos e `9 s` para transicoes entre palavras (elevando o LOVO na ordem da frase para `61/64 = 95,3%` sem bloquear gestos claros fora de ordem).
+
 ---
 
 ## 9. Melhorias Futuras
 
-Para a etapa atual do projeto, o classificador Random Forest (`modelo_libras_mobile.json`) foi mantido por oferecer estabilidade com a quantidade atual de videos reais por sinal. Como evolucao planejada apos esta versao:
+Para a etapa atual do projeto, o classificador Random Forest (`modelo_libras_mobile.json` no Modo Geral e `modelo_apresentacao_mobile.json` no Modo Apresentacao) foi mantido por oferecer estabilidade com a quantidade atual de videos reais por sinal. Como evolucao planejada apos esta versao:
 
 - **Migracao para TensorFlow Lite / LiteRT com rede temporal (1D-CNN ou GRU)**: substituir a classificacao por resumo de 110 atributos no JavaScript por um modelo `.tflite` executando diretamente no modulo Kotlin ([LibrasNativeCameraView.kt](aplicativo/modules/libras-native/android/src/main/java/expo/modules/librasnative/LibrasNativeCameraView.kt)), recebendo sequencias frame a frame (`T x F`) para aprender sinais longos e compostos sem decomposicao manual e reduzir o tamanho do modelo embarcado.
 - **Ampliacao da base de videos reais**: antes de treinar uma rede neural temporal, expandir a coleta real por sinal (integrando mais articuladores do V-LIBRASIL, base MINDS-Libras e gravacoes proprias no celular), aplicando *data augmentation* sobre as sequencias reais de landmarks e mantendo a validacao rigorosa sem vazamento (*Leave-One-Video-Out* / *Leave-One-Signer-Out*).
