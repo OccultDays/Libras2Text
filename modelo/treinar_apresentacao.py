@@ -34,12 +34,13 @@ from extrator_pontos import (
     ExtratorPontos,
     calcular_vetor_quadro,
     filtrar_maos_ativas,
-    montar_vetor_temporal,
+    montar_vetor_temporal_expandido,
 )
+
+TOTAL_CARACTERISTICAS = 132
 
 JANELA_TEMPORAL_SEG = 1.1
 INTERVALO_AMOSTRA_SEG = 0.11
-JANELA_COMPOSICAO_SEG = 2.8
 
 INES_BASE = "https://www.ines.gov.br/dicionario-de-libras/public/media/palavras/videos/"
 VLIB_BASE = "https://huggingface.co/datasets/SchberGg/v-librasil-raw/resolve/main/videos/"
@@ -60,7 +61,7 @@ REUTILIZAR_ARQUIVOS = {
         os.path.join(PASTA_VIDEOS_REAIS, "V", "vlibrasil_v_2.mp4"),
     ],
 }
-SINAIS_COMPOSTOS_TESTE = {"BOM DIA"}
+SINAIS_COMPOSTOS_TESTE = set()
 
 # Catalogo oficial curado visualmente (zero duplicatas e zero variantes incompativeis)
 CATALOGO_APRESENTACAO = {
@@ -104,6 +105,8 @@ CATALOGO_APRESENTACAO = {
         ("vlibrasil_tempo_1.mp4", VLIB_BASE + urllib.parse.quote("Tempo_Articulador1.mp4")),
         ("vlibrasil_tempo_3.mp4", VLIB_BASE + urllib.parse.quote("Tempo_Articulador3.mp4")),
         ("ines_tempo1.mp4", INES_BASE + "tempoSm_Prog001.mp4"),
+        ("ines_hora1.mp4", INES_BASE + "hora1Sm_Prog001.mp4"),
+        ("sts_hora.mp4", "https://media.spreadthesign.com/video/mp4/14/551946.mp4"),
         ("vlibrasil_hora_1.mp4", VLIB_BASE + urllib.parse.quote("Hora_Articulador1.mp4")),
         ("vlibrasil_hora_2.mp4", VLIB_BASE + urllib.parse.quote("Hora_Articulador2.mp4")),
         ("vlibrasil_hora_3.mp4", VLIB_BASE + urllib.parse.quote("Hora_Articulador3.mp4")),
@@ -114,7 +117,6 @@ CATALOGO_APRESENTACAO = {
         ("vlibrasil_real_3.mp4", VLIB_BASE + urllib.parse.quote("Real_Articulador3.mp4")),
         ("ines_real2.mp4", INES_BASE + "real2Sm_Prog001.mp4"),
         ("ines_verdade.mp4", INES_BASE + "verdadeSm_Prog001.mp4"),
-        ("ufsc_real_311.mp4", UFSC_GLOSS + "311-sinal-2019-09-14-19-34-02.mp4"),
         ("sb_verdade.mp4", SIGNBANK + "VERDADE.mp4"),
         ("sts_verdade1.mp4", "https://media.spreadthesign.com/video/mp4/14/552936.mp4"),
         ("malta_acess2_real2.pt", MALTA + "acessibilidade_2/real2.pt"),
@@ -419,11 +421,11 @@ def extrair_sequencia_video(extrator, caminho_video, recorte_celular=False, espe
 
         maos_ativas = filtrar_maos_ativas(maos_brutas, larg, alt, pontos_pose if pontos_pose else None)
 
-        if coletar_neutro and maos_brutas and not maos_ativas and len(vetores_neutros) < 4:
+        if coletar_neutro and maos_brutas and not maos_ativas and len(vetores_neutros) < 6:
             outra_rep = maos_brutas[1] if len(maos_brutas) == 2 else None
             q_rep = calcular_vetor_quadro(maos_brutas[0], larg, alt, pontos_pose if pontos_pose else None, outra_rep)
             if q_rep is not None:
-                vetores_neutros.append(montar_vetor_temporal([q_rep]))
+                vetores_neutros.append(montar_vetor_temporal_expandido([q_rep]))
 
         if len(maos_ativas) == 0:
             quadros_0_maos += 1
@@ -491,7 +493,7 @@ def extrair_sequencia_video(extrator, caminho_video, recorte_celular=False, espe
 
         opcoes_trilhas = []
         for trilha in trilhas_ativas:
-            vetor = montar_vetor_temporal(list(trilha["quadros"]))
+            vetor = montar_vetor_temporal_expandido(list(trilha["quadros"]))
             opcoes_trilhas.append({
                 "vetor": vetor,
                 "centro_y": trilha["centro"][1],
@@ -554,7 +556,6 @@ def classificar_sequencia(seq, fn_prever):
     estava_em_movimento = False
     predicoes_janela = []
     acumulador_gesto = {}
-    ultimo_comp = {"rotulo": "", "tempo": -10.0}
     soma_probs_classe = Counter()
     total_avaliacoes = 0
 
@@ -578,6 +579,8 @@ def classificar_sequencia(seq, fn_prever):
             if len(trilhas_ativas) > 1:
                 if (maior_y - menor_y) > 0.14 and t["centro_y"] <= menor_y + 0.02:
                     prioridade += 0.08
+                if len(vetor) >= 132 and float(vetor[118]) > 0.25 and (maior_y - menor_y) > 0.10 and t["centro_y"] <= menor_y + 0.02:
+                    prioridade += 0.08
                 if em_mov:
                     prioridade += 0.14
             avaliacoes.append({
@@ -585,6 +588,7 @@ def classificar_sequencia(seq, fn_prever):
                 "conf": conf,
                 "prioridade": prioridade,
                 "em_mov": em_mov,
+                "quadros": t["quadros"],
                 "ranking": ranking,
             })
 
@@ -593,11 +597,13 @@ def classificar_sequencia(seq, fn_prever):
             rot_bruto = escolhida["rotulo"]
             conf_bruta = min(1.0, escolhida["conf"] + 0.05)
             em_mov_atual = avaliacoes[0]["em_mov"] or avaliacoes[1]["em_mov"]
+            buffer_atual = max(avaliacoes[0]["quadros"], avaliacoes[1]["quadros"])
         else:
             escolhida = max(avaliacoes, key=lambda a: a["prioridade"])
             rot_bruto = escolhida["rotulo"]
             conf_bruta = escolhida["conf"]
             em_mov_atual = escolhida["em_mov"]
+            buffer_atual = escolhida["quadros"]
 
         for cls, p in escolhida["ranking"].items():
             if cls != "NEUTRO":
@@ -610,19 +616,13 @@ def classificar_sequencia(seq, fn_prever):
 
         votacoes.append((rot_bruto, conf_bruta))
         pred_base, media_conf = escolher_rotulo_votacao(votacoes)
-        pred_exib = pred_base
 
-        if pred_exib == "BOM":
-            ultimo_comp = {"rotulo": "BOM", "tempo": tempo_atual}
-        elif pred_exib == "DIA" and ultimo_comp["rotulo"] == "BOM" and (tempo_atual - ultimo_comp["tempo"]) <= JANELA_COMPOSICAO_SEG:
-            pred_exib = "BOM DIA"
-
-        if pred_exib:
-            predicoes_janela.append((pred_exib, media_conf))
+        if pred_base:
+            predicoes_janela.append((pred_base, media_conf))
 
         if pred_base and media_conf >= 0.36:
             reg = acumulador_gesto.setdefault(pred_base, [0.0, 0.0, 0.0, 0, tempo_atual, tempo_atual])
-            reg[0] += media_conf
+            reg[0] += media_conf * min(1.0, buffer_atual / 4.0)
             reg[1] += media_conf
             if media_conf > reg[2]:
                 reg[2] = media_conf
@@ -631,34 +631,14 @@ def classificar_sequencia(seq, fn_prever):
 
     melhor_rotulo = ""
     melhor_conf = 0.0
-    reg_bom = acumulador_gesto.get("BOM")
-    reg_dia = acumulador_gesto.get("DIA")
-
-    melhor_ind_soma = -1.0
-    melhor_ind_rotulo = ""
-    melhor_ind_conf = 0.0
+    melhor_soma = -1.0
     for rotulo, (soma, soma_conf, max_conf, contagem, _, _) in acumulador_gesto.items():
         if contagem < 2 and max_conf < 0.48:
             continue
-        if soma > melhor_ind_soma:
-            melhor_ind_soma = soma
-            melhor_ind_rotulo = rotulo
-            melhor_ind_conf = max(soma_conf / contagem, max_conf * 0.9)
-
-    if (
-        reg_bom
-        and reg_dia
-        and reg_bom[4] <= reg_dia[5]
-        and reg_bom[3] >= 2
-        and reg_dia[3] >= 2
-        and (reg_bom[0] + reg_dia[0]) >= 0.95 * max(melhor_ind_soma, 0.0)
-    ):
-        melhor_rotulo = "BOM DIA"
-        tot_cont = reg_bom[3] + reg_dia[3]
-        melhor_conf = max((reg_bom[1] + reg_dia[1]) / tot_cont, max(reg_bom[2], reg_dia[2]) * 0.9)
-    else:
-        melhor_rotulo = melhor_ind_rotulo
-        melhor_conf = melhor_ind_conf
+        if soma > melhor_soma:
+            melhor_soma = soma
+            melhor_rotulo = rotulo
+            melhor_conf = max(soma_conf / contagem, max_conf * 0.9)
 
     contagem_pred = Counter(p for p, _ in predicoes_janela)
     pred_majoritaria = contagem_pred.most_common(1)[0][0] if contagem_pred else ""
@@ -689,21 +669,27 @@ def extrair_dataset_apresentacao(sinais_filtro=None):
         return
 
     extrator = ExtratorPontos()
-    cabecalho = ["rotulo", "origem_video"] + [f"coord_{i}" for i in range(110)]
+    cabecalho = ["rotulo", "origem_video"] + [f"coord_{i}" for i in range(TOTAL_CARACTERISTICAS)]
     linhas = [cabecalho]
     neutros_total = 0
 
-    visoes = (
+    visoes_base = (
         (False, False, 1.0),
         (False, True, 1.0),
         (True, False, 1.0),
         (True, True, 1.0),
         (True, False, 1.18),
     )
+    visoes_reforco = visoes_base + (
+        (True, True, 1.18),
+        (True, False, 0.90),
+    )
     sinais_2m = {"ACESSIBILIDADE", "APLICATIVO", "LIBRAS", "TEXTO", "TRADUZIR", "TEMPO", "REAL", "INOVACAO"}
+    sinais_reforco = {"APLICATIVO", "INOVACAO", "ACESSIBILIDADE", "TEXTO", "TRANSFORMAR"}
 
     for sinal, lista in videos_por_sinal.items():
         total_sinal = 0
+        visoes = visoes_reforco if sinal in sinais_reforco else visoes_base
         for caminho in lista:
             origem = f"{sinal}/{os.path.basename(caminho)}"
             for recorte, espelhar, zoom in visoes:
@@ -718,14 +704,25 @@ def extrair_dataset_apresentacao(sinais_filtro=None):
                 if seq is None:
                     continue
 
-                if seq["vetores_neutros"] and neutros_total < 140:
-                    for vn in seq["vetores_neutros"][:2]:
+                if seq["vetores_neutros"] and neutros_total < 220:
+                    for vn in seq["vetores_neutros"][:3]:
                         linhas.append(["NEUTRO", origem] + [round(float(x), 6) for x in vn])
                         neutros_total += 1
 
                 janelas_validas = [j for j in seq["janelas"] if not j.get("vazio") and j["trilhas"]]
                 if not janelas_validas:
                     continue
+
+                janelas_1m_inov = []
+                if sinal == "INOVACAO":
+                    janelas_1m_inov = [
+                        j for j in janelas_validas
+                        if all(t["vetor"][92] < 0.5 for t in j["trilhas"])
+                        and any(
+                            t["vetor"][74] > 0.7 and t["vetor"][75] > 0.7 and t["vetor"][76] < -0.2 and t["vetor"][77] < -0.2
+                            for t in j["trilhas"]
+                        )
+                    ][:4]
 
                 if sinal in sinais_2m:
                     j2m = [
@@ -752,6 +749,13 @@ def extrair_dataset_apresentacao(sinais_filtro=None):
                             continue
                         linhas.append([sinal, origem] + [round(float(x), 6) for x in t["vetor"]])
                         total_sinal += 1
+
+                for j in janelas_1m_inov:
+                    for t in j["trilhas"]:
+                        if t["quadros"] < 2:
+                            continue
+                        linhas.append([sinal, origem] + [round(float(x), 6) for x in t["vetor"]])
+                        total_sinal += 1
         print(f"[extraido] {sinal:14s}: {total_sinal} janelas reais ({len(lista)} videos)")
 
     print(f"[extraido] {'NEUTRO':14s}: {neutros_total} janelas reais de repouso")
@@ -760,10 +764,43 @@ def extrair_dataset_apresentacao(sinais_filtro=None):
     print(f"Dataset da apresentacao salvo em {CAMINHO_DATASET_APRES} ({len(linhas) - 1} amostras).")
 
 
+def _expandir_sintetico_110_para_132(v):
+    ang_sim = math.atan2(v[9 * 3 + 1], abs(v[9 * 3 + 0]))
+    abs_det = min(1.5, abs(v[5 * 3 + 0] * v[17 * 3 + 1] - v[5 * 3 + 1] * v[17 * 3 + 0]))
+    pol_base = min(2.5, math.hypot(v[4 * 3 + 0] - v[5 * 3 + 0], v[4 * 3 + 1] - v[5 * 3 + 1]))
+    if v[92] > 0.5:
+        biman_extras = [
+            min(4.0, v[94]),
+            min(4.0, v[93]),
+            min(4.0, v[94]),
+            min(4.0, max(0.2, v[93] * 0.7)),
+            min(4.0, abs(v[96])),
+            0.0,
+            v[73],
+            v[74],
+            v[75],
+            v[76],
+            v[77],
+        ]
+    else:
+        biman_extras = [4.0, 4.0, 4.0, 4.0, 4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    temp_extras = [
+        0.05,
+        0.0,
+        min(4.0, abs(v[105]) * 1.5),
+        min(3.0, abs(v[105])),
+        0.0,
+        0.0,
+        0.0,
+        min(4.0, v[94]) if v[92] > 0.5 else 4.0,
+    ]
+    return v + [ang_sim, abs_det, pol_base] + biman_extras + temp_extras
+
+
 def carregar_sintetico_filtrado(classes_permitidas):
     rotulos, dados = [], []
     if not os.path.exists(CAMINHO_DATASET_SINT):
-        return np.empty((0, 110)), np.array([])
+        return np.empty((0, TOTAL_CARACTERISTICAS)), np.array([])
     with open(CAMINHO_DATASET_SINT, "r", encoding="utf-8") as arq:
         leitor = csv.reader(arq)
         next(leitor, None)
@@ -774,19 +811,19 @@ def carregar_sintetico_filtrado(classes_permitidas):
             if r not in classes_permitidas:
                 continue
             rotulos.append(r)
-            dados.append([float(v) for v in linha[1:]])
+            dados.append(_expandir_sintetico_110_para_132([float(v) for v in linha[1:]]))
     return np.array(dados, dtype=np.float64), np.array(rotulos)
 
 
 def carregar_dataset_videos(caminho_csv=CAMINHO_DATASET_APRES):
     rotulos, origens, dados = [], [], []
     if not os.path.exists(caminho_csv):
-        return np.empty((0, 110)), np.array([]), np.array([])
+        return np.empty((0, TOTAL_CARACTERISTICAS)), np.array([]), np.array([])
     with open(caminho_csv, "r", encoding="utf-8") as arq:
         leitor = csv.reader(arq)
         next(leitor, None)
         for linha in leitor:
-            if len(linha) != 112:
+            if len(linha) != TOTAL_CARACTERISTICAS + 2:
                 continue
             rotulos.append(linha[0])
             origens.append(linha[1])
@@ -801,14 +838,21 @@ def montar_pesos(rotulos_sint, rotulos_reais):
 
     pesos_sint = []
     for r in rotulos_sint:
-        alvo_s = 25.0 if r in subclasses else 35.0
+        alvo_s = 25.0 if (r in subclasses or r == "BOM") else 35.0
         pesos_sint.append(min(1.0, alvo_s / max(cont_sint[r], 1)))
 
     pesos_reais = []
     for r in rotulos_reais:
-        alvo = 85.0 if r in subclasses else 150.0
+        if r == "DIA_SOL":
+            alvo = 100.0
+        elif r in subclasses:
+            alvo = 85.0
+        elif r == "BOM":
+            alvo = 115.0
+        else:
+            alvo = 150.0
         if r in cont_sint:
-            alvo -= 25.0 if r in subclasses else 35.0
+            alvo -= 25.0 if (r in subclasses or r == "BOM") else 35.0
         pesos_reais.append(min(5.0, max(0.08, alvo / max(cont_reais[r], 1))))
 
     return np.array(pesos_sint + pesos_reais, dtype=np.float64)
@@ -820,7 +864,7 @@ def validar_lovo(sinais_filtro=None, recorte_celular=True):
         print("Execute primeiro --extrair-treino.")
         return
 
-    x_sint, y_sint = carregar_sintetico_filtrado({"BOM", "DIA_ROSTO", "DIA_SOL", "NEUTRO"})
+    x_sint, y_sint = carregar_sintetico_filtrado({"DIA_SOL", "NEUTRO"})
     videos_por_sinal = listar_videos_apresentacao(sinais_filtro, incluir_compostos_teste=True)
     extrator = ExtratorPontos()
 
@@ -850,8 +894,8 @@ def validar_lovo(sinais_filtro=None, recorte_celular=True):
         pesos = montar_pesos(y_sint, y_r)
 
         rf = RandomForestClassifier(
-            n_estimators=90,
-            max_depth=16,
+            n_estimators=100,
+            max_depth=17,
             min_samples_leaf=2,
             random_state=42,
             n_jobs=-1,
@@ -897,15 +941,15 @@ def treinar_e_exportar():
         print("Execute primeiro --extrair-treino.")
         return
 
-    x_sint, y_sint = carregar_sintetico_filtrado({"BOM", "DIA_ROSTO", "DIA_SOL", "NEUTRO"})
+    x_sint, y_sint = carregar_sintetico_filtrado({"DIA_SOL", "NEUTRO"})
     x = np.vstack([x_sint, x_real]) if len(x_sint) > 0 else x_real
     y = np.concatenate([y_sint, y_real]) if len(y_sint) > 0 else y_real
     pesos = montar_pesos(y_sint, y_real)
 
     x_tr, x_te, y_tr, y_te, p_tr, _ = train_test_split(x, y, pesos, test_size=0.2, random_state=42, stratify=y)
     modelo = RandomForestClassifier(
-        n_estimators=90,
-        max_depth=16,
+        n_estimators=100,
+        max_depth=17,
         min_samples_leaf=2,
         random_state=42,
         n_jobs=-1,
@@ -928,12 +972,15 @@ def treinar_e_exportar():
         valores = arvore.value[:, 0, :]
         totais = valores.sum(axis=1, keepdims=True)
         probabilidades = np.divide(valores, totais, out=np.zeros_like(valores), where=totais != 0)
+        probs_arred = np.round(probabilidades, 4).tolist()
+        eh_folha = (arvore.children_left == -1).tolist()
+        probs_otim = [probs_arred[idx] if folha else [] for idx, folha in enumerate(eh_folha)]
         arvores.append({
             "esquerda": arvore.children_left.tolist(),
             "direita": arvore.children_right.tolist(),
             "caracteristica": arvore.feature.tolist(),
             "limite": np.round(arvore.threshold, 6).tolist(),
-            "probabilidades": np.round(probabilidades, 4).tolist(),
+            "probabilidades": probs_otim,
         })
 
     artefato = {
