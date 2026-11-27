@@ -195,6 +195,7 @@ async def rota_websocket(websocket: WebSocket):
     quadros_sem_deteccao = 0
     ultimo_instante_mao = 0.0
     estava_em_movimento = False
+    ultimo_sinal_comp = {"rotulo": "", "instante": 0.0}
 
     try:
         while True:
@@ -212,6 +213,7 @@ async def rota_websocket(websocket: WebSocket):
                         historico_votos.clear()
                         quadros_sem_deteccao = 0
                         estava_em_movimento = False
+                        ultimo_sinal_comp = {"rotulo": "", "instante": 0.0}
                         continue
                     imagem_base64 = dados_json.get("imagem") or dados_json.get("frame") or ""
                 except Exception:
@@ -240,6 +242,8 @@ async def rota_websocket(websocket: WebSocket):
                     trilhas_maos.clear()
                     historico_votos.clear()
                     estava_em_movimento = False
+                    if ultimo_sinal_comp["rotulo"] != "BOM":
+                        ultimo_sinal_comp = {"rotulo": "", "instante": 0.0}
                 await gerenciador.enviar_json(websocket, {
                     "prediction": "",
                     "confidence": 0.0,
@@ -270,6 +274,18 @@ async def rota_websocket(websocket: WebSocket):
 
             historico_votos.append((rotulo_bruto, conf_bruta))
             rotulo_final, conf_final = _escolher_rotulo_votacao(historico_votos)
+            if rotulo_final == "BOM":
+                ultimo_sinal_comp = {"rotulo": "BOM", "instante": agora_mono}
+            elif rotulo_final in ("DIA", "D") and (
+                ultimo_sinal_comp["rotulo"] == "BOM_DIA"
+                or (ultimo_sinal_comp["rotulo"] == "BOM" and (agora_mono - ultimo_sinal_comp["instante"]) <= 2.8)
+            ):
+                rotulo_final = "BOM DIA"
+                ultimo_sinal_comp = {"rotulo": "BOM_DIA", "instante": ultimo_sinal_comp["instante"]}
+            elif rotulo_final and ultimo_sinal_comp["rotulo"]:
+                ultimo_sinal_comp = {"rotulo": "", "instante": 0.0}
+            elif not rotulo_final and ultimo_sinal_comp["rotulo"] == "BOM_DIA":
+                ultimo_sinal_comp = {"rotulo": "", "instante": 0.0}
             tempo_ms = round((time.perf_counter() - inicio) * 1000, 2)
 
             await gerenciador.enviar_json(websocket, {

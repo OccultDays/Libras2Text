@@ -4,8 +4,27 @@ import { useCameraPermissions } from 'expo-camera';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import LibrasNativeCamera from './modules/libras-native';
 import modeloLocal from './assets/modelo_libras_mobile.json';
+import modeloExpandido from './assets/modelo_apresentacao_mobile.json';
 
 const JANELA_TEMPORAL_MS = 1100;
+const COOLDOWN_PALAVRA_MS = 1500;
+const COOLDOWN_LETRA_MS = 1200;
+const MAPA_SUBCLASSES = {
+  DIA_ROSTO: 'DIA',
+  DIA_SOL: 'DIA',
+  '2_HORIZ': '2',
+  '2_VERT': '2',
+};
+
+function extrairUltimoTokenSimples(texto) {
+  const limpo = (texto || '').trim();
+  if (!limpo) return '';
+  if (limpo === 'POR FAVOR' || limpo.endsWith(' POR FAVOR')) {
+    return 'POR FAVOR';
+  }
+  const partes = limpo.split(/\s+/);
+  return partes[partes.length - 1] || '';
+}
 
 function limitar(valor, minimo, maximo) {
   return Math.max(minimo, Math.min(maximo, valor));
@@ -13,6 +32,87 @@ function limitar(valor, minimo, maximo) {
 
 function norma3d(a, b = [0, 0, 0]) {
   return Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+}
+
+function filtrarMaosAtivas(listaMaos3d, larguraQuadro = 480, alturaQuadro = 640, pontosPose = null) {
+  if (!Array.isArray(listaMaos3d) || listaMaos3d.length === 0) return [];
+
+  const maiorLado = Math.max(larguraQuadro || 480, alturaQuadro || 640, 1);
+  const escalaX = (larguraQuadro || 480) / maiorLado;
+  const escalaY = (alturaQuadro || 640) / maiorLado;
+
+  let poseValida = false;
+  let narizY = 0;
+  let largOmbros = 0.30;
+  if (Array.isArray(pontosPose) && pontosPose.length >= 9) {
+    const p0 = pontosPose[0];
+    const p7 = pontosPose[7];
+    const p8 = pontosPose[8];
+    if (Array.isArray(p0) && Array.isArray(p7) && Array.isArray(p8)) {
+      const ny = Number(p0[1]) * escalaY;
+      const oex = Number(p7[0]) * escalaX;
+      const oey = Number(p7[1]) * escalaY;
+      const odx = Number(p8[0]) * escalaX;
+      const ody = Number(p8[1]) * escalaY;
+      if (
+        Number.isFinite(ny) && Number.isFinite(oex) && Number.isFinite(oey) &&
+        Number.isFinite(odx) && Number.isFinite(ody)
+      ) {
+        narizY = ny;
+        largOmbros = Math.max(Math.hypot(oex - odx, oey - ody), 0.12);
+        poseValida = true;
+      }
+    }
+  }
+
+  const candidatas = [];
+  for (const mao of listaMaos3d) {
+    if (!Array.isArray(mao) || mao.length !== 21) continue;
+    const rawY = Number(mao[0][1]);
+    const pulsoX = Number(mao[0][0]) * escalaX;
+    const pulsoY = rawY * escalaY;
+    const indY = Number(mao[8][1]) * escalaY;
+    if (!Number.isFinite(pulsoX) || !Number.isFinite(pulsoY) || !Number.isFinite(indY)) continue;
+
+    let somaPalma = 0;
+    for (const idxBase of [5, 9, 13, 17]) {
+      const dx = Number(mao[idxBase][0]) * escalaX - pulsoX;
+      const dy = Number(mao[idxBase][1]) * escalaY - pulsoY;
+      somaPalma += Math.hypot(dx, dy);
+    }
+    const escalaMao = (somaPalma / 4.0) / 0.45;
+    if (escalaMao < 0.02) continue;
+
+    let py;
+    if (poseValida) {
+      py = limitar((pulsoY - narizY) / largOmbros, -2.0, 2.5);
+      const iy = limitar((indY - narizY) / largOmbros, -2.0, 2.5);
+      if (py >= 1.35 && iy >= 1.28 && rawY >= 0.80) continue;
+    } else {
+      py = limitar((rawY - 0.30) * 2.0, -2.0, 2.5);
+    }
+
+    candidatas.push({ mao, py, rawY, escalaMao });
+  }
+
+  if (candidatas.length <= 1) {
+    return candidatas.map((c) => c.mao);
+  }
+
+  candidatas.sort((a, b) => a.rawY - b.rawY);
+  const alta = candidatas[0];
+  const baixa = candidatas[1];
+  const difPy = baixa.py - alta.py;
+  const dxInd = (Number(alta.mao[8][0]) - Number(baixa.mao[8][0])) * escalaX;
+  const dyInd = (Number(alta.mao[8][1]) - Number(baixa.mao[8][1])) * escalaY;
+  const distInd = Math.hypot(dxInd, dyInd) / Math.max(alta.escalaMao, 0.05);
+
+  const baixaEmRepouso = (
+    (baixa.py >= 1.22 && difPy >= 0.45 && distInd >= 1.10) ||
+    (difPy >= 0.65 && distInd >= 1.30) ||
+    (baixa.rawY >= 0.84 && difPy >= 0.25 && distInd >= 1.10)
+  );
+  return baixaEmRepouso ? [alta.mao] : [alta.mao, baixa.mao];
 }
 
 function calcularVetorQuadro(pontosMao3d, larguraQuadro = 480, alturaQuadro = 640, pontosPose = null, outraMao3d = null) {
@@ -51,6 +151,14 @@ function calcularVetorQuadro(pontosMao3d, larguraQuadro = 480, alturaQuadro = 64
   if (escalaMao < 0.02) return null;
 
   const h = relativos.map((p) => [p[0] / escalaMao, p[1] / escalaMao, p[2] / escalaMao]);
+  const escRef = Math.max(escalaMao, 0.05);
+  const rel2d = relativos.map((p) => [p[0] / escRef, p[1] / escRef]);
+  const detPalmaBruto = rel2d[5][0] * rel2d[17][1] - rel2d[5][1] * rel2d[17][0];
+  const angPalmaSim = Math.atan2(rel2d[9][1], Math.abs(rel2d[9][0]));
+  const absDetPalma = limitar(Math.abs(detPalmaBruto), 0.0, 1.5);
+  const polRel = [rel2d[4][0] - rel2d[5][0], rel2d[4][1] - rel2d[5][1]];
+  const distPolBaseInd = limitar(Math.hypot(polRel[0], polRel[1]), 0.0, 2.5);
+
   const detPalma = h[5][0] * h[17][1] - h[5][1] * h[17][0];
   if (detPalma < 0) {
     for (let i = 0; i < 21; i += 1) {
@@ -138,6 +246,14 @@ function calcularVetorQuadro(pontosMao3d, larguraQuadro = 480, alturaQuadro = 64
   let distPontasMed = 4.0;
   let difAlturaPulsos = 0.0;
   let cosPalmas = 0.0;
+  let distPolOutraPalma = 4.0;
+  let distIndOutraPulso = 4.0;
+  let distIndOutraPalma = 4.0;
+  let dxPulsosAbs = 4.0;
+  let dyPulsosAbs = 4.0;
+  let difCurvMaos = 0.0;
+  const curvOutra = [0.0, 0.0, 0.0, 0.0, 0.0];
+  let dxPulsosSinal = 0.0;
 
   if (Array.isArray(outraMao3d) && outraMao3d.length === 21) {
     const outra = [];
@@ -168,10 +284,59 @@ function calcularVetorQuadro(pontosMao3d, larguraQuadro = 480, alturaQuadro = 64
       const dirBY = outra[9][1] - outra[0][1];
       const normaAB = Math.hypot(dirAX, dirAY) * Math.hypot(dirBX, dirBY) + 1e-6;
       cosPalmas = limitar((dirAX * dirBX + dirAY * dirBY) / normaAB, -1.0, 1.0);
+
+      const relO = outra.map((p) => [p[0] - outra[0][0], p[1] - outra[0][1]]);
+      const tamO = (
+        Math.hypot(relO[5][0], relO[5][1]) +
+        Math.hypot(relO[9][0], relO[9][1]) +
+        Math.hypot(relO[13][0], relO[13][1]) +
+        Math.hypot(relO[17][0], relO[17][1])
+      ) / 4.0;
+      const escO = Math.max(tamO / 0.45, 0.05);
+      const ho = relO.map((p) => [p[0] / escO, p[1] / escO]);
+      for (let k = 0; k < cadeias.length; k += 1) {
+        const [a, b, c, d] = cadeias[k];
+        const v1x = ho[b][0] - ho[a][0];
+        const v1y = ho[b][1] - ho[a][1];
+        const v2x = ho[d][0] - ho[c][0];
+        const v2y = ho[d][1] - ho[c][1];
+        const normO = Math.hypot(v1x, v1y) * Math.hypot(v2x, v2y) + 1e-6;
+        curvOutra[k] = (v1x * v2x + v1y * v2y) / normO;
+      }
+      const centroPalmaOX = 0.25 * (outra[0][0] + outra[5][0] + outra[9][0] + outra[17][0]);
+      const centroPalmaOY = 0.25 * (outra[0][1] + outra[5][1] + outra[9][1] + outra[17][1]);
+      distPolOutraPalma = limitar(Math.hypot(mao[4][0] - centroPalmaOX, mao[4][1] - centroPalmaOY) / escRef, 0.0, 4.0);
+      distIndOutraPulso = limitar(Math.hypot(mao[8][0] - outra[0][0], mao[8][1] - outra[0][1]) / escRef, 0.0, 4.0);
+      distIndOutraPalma = limitar(Math.hypot(mao[8][0] - centroPalmaOX, mao[8][1] - centroPalmaOY) / escRef, 0.0, 4.0);
+      dxPulsosAbs = limitar(Math.abs(mao[0][0] - outra[0][0]) / escRef, 0.0, 4.0);
+      dyPulsosAbs = limitar(Math.abs(mao[0][1] - outra[0][1]) / escRef, 0.0, 4.0);
+      let somaDifCurv = 0;
+      for (let k = 0; k < 5; k += 1) {
+        somaDifCurv += Math.abs(valores[73 + k] - curvOutra[k]);
+      }
+      difCurvMaos = somaDifCurv / 5.0;
+      dxPulsosSinal = limitar((mao[0][0] - outra[0][0]) / escRef, -4.0, 4.0);
     }
   }
 
   valores.push(temOutraMao, distPulsos, distPontasInd, distPontasMed, difAlturaPulsos, cosPalmas);
+
+  const extrasQuadro = [
+    angPalmaSim,
+    absDetPalma,
+    distPolBaseInd,
+    distPolOutraPalma,
+    distIndOutraPulso,
+    distIndOutraPalma,
+    dxPulsosAbs,
+    dyPulsosAbs,
+    difCurvMaos,
+    curvOutra[0],
+    curvOutra[1],
+    curvOutra[2],
+    curvOutra[3],
+    curvOutra[4],
+  ];
 
   return {
     vetor: valores,
@@ -179,6 +344,12 @@ function calcularVetorQuadro(pontosMao3d, larguraQuadro = 480, alturaQuadro = 64
     centro: [Number(pontosMao3d[0][0]), Number(pontosMao3d[0][1])],
     escalaMao,
     instante: Date.now(),
+    extrasQuadro,
+    detPalma: detPalmaBruto,
+    polRel,
+    dxPulsosSinal,
+    distIndOutraPulso,
+    temOutra: temOutraMao,
   };
 }
 
@@ -239,13 +410,26 @@ function montarVetorTemporal(historico) {
 
   const vetorBase = atual.vetor.slice();
   if (vetorBase.length >= 98 && vetorBase[92] < 0.5 && historico.length >= 2) {
+    let recuperou = false;
     const inicioBusca = Math.max(0, historico.length - 3);
     for (let i = historico.length - 2; i >= inicioBusca; i -= 1) {
       if (historico[i].vetor.length >= 98 && historico[i].vetor[92] > 0.5) {
         for (let k = 92; k < 98; k += 1) {
           vetorBase[k] = historico[i].vetor[k];
         }
+        recuperou = true;
         break;
+      }
+    }
+    if (!recuperou) {
+      for (let i = inicioBusca - 1; i >= 0; i -= 1) {
+        const va = historico[i].vetor;
+        if (va.length >= 98 && va[92] > 0.5 && (va[94] <= 0.85 || va[93] <= 1.25)) {
+          for (let k = 92; k < 98; k += 1) {
+            vetorBase[k] = va[k];
+          }
+          break;
+        }
       }
     }
   }
@@ -256,6 +440,92 @@ function montarVetorTemporal(historico) {
   }
 
   return vetorBase.concat([absDx, dy, ampX, ampY, energiaX, energiaY, energiaTotal], deltaDedos);
+}
+
+function montarVetorTemporalExpandido(historico) {
+  const v110 = montarVetorTemporal(historico);
+  const atual = historico[historico.length - 1];
+  const exQ = atual.extrasQuadro.slice();
+
+  if (v110[92] > 0.5 && atual.temOutra < 0.5) {
+    for (let i = historico.length - 2; i >= 0; i -= 1) {
+      if (historico[i].temOutra > 0.5) {
+        for (let k = 3; k < 14; k += 1) {
+          exQ[k] = historico[i].extrasQuadro[k];
+        }
+        break;
+      }
+    }
+  }
+
+  let minDet = Infinity;
+  let maxDet = -Infinity;
+  let energiaPolRel = 0;
+  let minPolX = Infinity;
+  let maxPolX = -Infinity;
+  let minPolY = Infinity;
+  let maxPolY = -Infinity;
+
+  for (let i = 0; i < historico.length; i += 1) {
+    const item = historico[i];
+    if (item.detPalma < minDet) minDet = item.detPalma;
+    if (item.detPalma > maxDet) maxDet = item.detPalma;
+    const [px, py] = item.polRel;
+    if (px < minPolX) minPolX = px;
+    if (px > maxPolX) maxPolX = px;
+    if (py < minPolY) minPolY = py;
+    if (py > maxPolY) maxPolY = py;
+    if (i > 0) {
+      const ant = historico[i - 1].polRel;
+      energiaPolRel += Math.hypot(px - ant[0], py - ant[1]);
+    }
+  }
+
+  const ampDetPalma = limitar(maxDet - minDet, 0.0, 2.0);
+  const flipDetPalma = minDet < -0.03 && maxDet > 0.03 ? 1.0 : 0.0;
+  energiaPolRel = Math.min(4.0, energiaPolRel);
+  const ampPolRel = Math.min(3.0, Math.hypot(maxPolX - minPolX, maxPolY - minPolY));
+
+  const comOutra = historico.filter((item) => item.temOutra > 0.5);
+  let ampDxPulsos = 0.0;
+  let cruzouPulsosX = 0.0;
+  let energiaIndPulso = 0.0;
+  if (comOutra.length >= 2) {
+    let minDx = Infinity;
+    let maxDx = -Infinity;
+    for (let i = 0; i < comOutra.length; i += 1) {
+      const dx = comOutra[i].dxPulsosSinal;
+      if (dx < minDx) minDx = dx;
+      if (dx > maxDx) maxDx = dx;
+      if (i > 0) {
+        energiaIndPulso += Math.abs(comOutra[i].distIndOutraPulso - comOutra[i - 1].distIndOutraPulso);
+      }
+    }
+    ampDxPulsos = Math.min(4.0, maxDx - minDx);
+    cruzouPulsosX = minDx < -0.15 && maxDx > 0.15 ? 1.0 : 0.0;
+    energiaIndPulso = Math.min(4.0, energiaIndPulso);
+  }
+
+  let minDistPolPalma = exQ[3];
+  if (comOutra.length > 0) {
+    minDistPolPalma = Infinity;
+    for (const item of comOutra) {
+      if (item.extrasQuadro[3] < minDistPolPalma) {
+        minDistPolPalma = item.extrasQuadro[3];
+      }
+    }
+  }
+
+  return v110.concat(exQ, [
+    ampDetPalma,
+    flipDetPalma,
+    energiaPolRel,
+    ampPolRel,
+    ampDxPulsos,
+    cruzouPulsosX,
+    energiaIndPulso,
+    minDistPolPalma,
+  ]);
 }
 
 function preverModeloLocal(modelo, caracteristicas) {
@@ -279,14 +549,28 @@ function preverModeloLocal(modelo, caracteristicas) {
   }
 
   const quantidade = modelo.arvores.length || 1;
-  let melhorIndice = 0;
+  const agrupadas = new Map();
   for (let i = 0; i < probabilidades.length; i += 1) {
-    probabilidades[i] /= quantidade;
-    if (probabilidades[i] > probabilidades[melhorIndice]) melhorIndice = i;
+    const prob = probabilidades[i] / quantidade;
+    const rotuloBruto = modelo.rotulos[i] || '';
+    const rotuloExib = MAPA_SUBCLASSES[rotuloBruto] || rotuloBruto;
+    agrupadas.set(rotuloExib, (agrupadas.get(rotuloExib) || 0) + prob);
+  }
+
+  let melhorRotulo = '';
+  let melhorProb = 0;
+  for (const [rotulo, prob] of agrupadas.entries()) {
+    if (prob > melhorProb) {
+      melhorRotulo = rotulo;
+      melhorProb = prob;
+    }
+  }
+  if (melhorRotulo === 'NEUTRO') {
+    return { previsao: '', confianca: 0 };
   }
   return {
-    previsao: modelo.rotulos[melhorIndice] || '',
-    confianca: probabilidades[melhorIndice] || 0,
+    previsao: melhorRotulo,
+    confianca: melhorProb,
   };
 }
 
@@ -333,16 +617,20 @@ function AplicativoPrincipal() {
   const [gravandoGesto, setGravandoGesto] = useState(false);
   const [tempoGestoRestante, setTempoGestoRestante] = useState(0);
   const [contagemRegressiva, setContagemRegressiva] = useState(0);
+  const [vocabularioAtivo, setVocabularioAtivo] = useState('padrao');
 
   const capturandoRef = useRef(true);
   const trocandoCameraRef = useRef(false);
+  const vocabularioAtivoRef = useRef('padrao');
+  const textoCompletoRef = useRef('');
+  const temposInsercaoRef = useRef({});
   const ultimaLetraRef = useRef('');
   const ultimoSinalInseridoRef = useRef('');
   const contagemEstavelRef = useRef(0);
   const votacoesModeloRef = useRef([]);
   const gravandoGestoRef = useRef(false);
   const preparandoGestoRef = useRef(false);
-  const melhorPredicaoGestoRef = useRef({ rotulo: '', conf: 0, contagem: 0 });
+  const acumuladorGestoRef = useRef({});
   const historicoLocalRef = useRef([]);
   const falhasMaoLocalRef = useRef(0);
   const estavaEmMovimentoLocalRef = useRef(false);
@@ -376,7 +664,24 @@ function AplicativoPrincipal() {
     contagemEstavelRef.current = 0;
   }
 
-  function adicionarAoTexto(sinal) {
+  function atualizarTextoCompleto(novoTexto) {
+    textoCompletoRef.current = novoTexto;
+    setTextoCompleto(novoTexto);
+  }
+
+  function alternarVocabulario() {
+    if (gravandoGestoRef.current || preparandoGestoRef.current) return;
+    const proximo = vocabularioAtivoRef.current === 'padrao' ? 'expandido' : 'padrao';
+    vocabularioAtivoRef.current = proximo;
+    setVocabularioAtivo(proximo);
+    limparHistoricoPredicao();
+    temposInsercaoRef.current = {};
+    setLetraAtual('-');
+    setConfianca(0);
+    setQuadrosBuffer(0);
+  }
+
+  function adicionarAoTexto(sinal, forcarManual = false) {
     if (
       !sinal ||
       sinal === '-' ||
@@ -389,34 +694,58 @@ function AplicativoPrincipal() {
       return;
     }
 
-    setTextoCompleto((anterior) => {
-      const textoLimpo = anterior.trim();
-      if (!textoLimpo) {
-        return sinal;
+    const anterior = textoCompletoRef.current;
+    const agora = Date.now();
+    const ehPalavra = sinal.length > 1 || sinal === '2';
+
+    if (!anterior.trim()) {
+      atualizarTextoCompleto(sinal);
+      temposInsercaoRef.current[sinal] = agora;
+      ultimoSinalInseridoRef.current = sinal;
+      return;
+    }
+
+    if (!forcarManual) {
+      const ultimoTok = extrairUltimoTokenSimples(anterior);
+      const ultimoTempo = temposInsercaoRef.current[sinal] || 0;
+      if (ehPalavra && ultimoTok === sinal) {
+        return;
       }
-      if (sinal.length > 1 || anterior.endsWith(' ')) {
-        return anterior.endsWith(' ') ? anterior + sinal : `${anterior} ${sinal}`;
+      if (ehPalavra && agora - ultimoTempo < COOLDOWN_PALAVRA_MS) {
+        return;
       }
-      return anterior + sinal;
-    });
+      if (!ehPalavra && anterior.trimEnd().endsWith(sinal) && agora - ultimoTempo < COOLDOWN_LETRA_MS) {
+        return;
+      }
+    }
+
+    const novoTexto = (ehPalavra || anterior.endsWith(' '))
+      ? (anterior.endsWith(' ') ? anterior + sinal : `${anterior} ${sinal}`)
+      : anterior + sinal;
+    atualizarTextoCompleto(novoTexto);
+    temposInsercaoRef.current[sinal] = agora;
+    ultimoSinalInseridoRef.current = sinal;
   }
 
   function apagarUltimo() {
-    setTextoCompleto((anterior) => {
-      if (!anterior) return '';
+    const anterior = textoCompletoRef.current;
+    let novoTexto = '';
+    if (anterior) {
       const texto = anterior.trimEnd();
       const ultimoEspaco = texto.lastIndexOf(' ');
-      if (ultimoEspaco === -1) {
-        return '';
+      if (ultimoEspaco !== -1) {
+        novoTexto = texto.substring(0, ultimoEspaco);
       }
-      return texto.substring(0, ultimoEspaco);
-    });
+    }
+    atualizarTextoCompleto(novoTexto);
+    ultimoSinalInseridoRef.current = '';
+    temposInsercaoRef.current = {};
   }
 
   function receberQuadroLocal(evento) {
     try {
       processarQuadroLocal(evento);
-    } catch (_erro) {}
+    } catch (_erro) { }
   }
 
   function processarQuadroLocal(evento) {
@@ -429,15 +758,18 @@ function AplicativoPrincipal() {
       return;
     }
 
-    const listaMaos3d = Array.isArray(dados.pontos_maos_3d) ? dados.pontos_maos_3d : [];
+    const listaMaosBrutas = Array.isArray(dados.pontos_maos_3d) ? dados.pontos_maos_3d : [];
+    const largQuadro = dados.largura_quadro || 360;
+    const altQuadro = dados.altura_quadro || 480;
+    const listaMaos3d = filtrarMaosAtivas(listaMaosBrutas, largQuadro, altQuadro, dados.pontos_pose);
 
     const quadrosMaos = [];
     for (let idx = 0; idx < listaMaos3d.length; idx += 1) {
       const outraMao3d = listaMaos3d.length === 2 ? listaMaos3d[1 - idx] : null;
       const q = calcularVetorQuadro(
         listaMaos3d[idx],
-        dados.largura_quadro || 240,
-        dados.altura_quadro || 320,
+        largQuadro,
+        altQuadro,
         dados.pontos_pose,
         outraMao3d
       );
@@ -513,13 +845,21 @@ function AplicativoPrincipal() {
     const menorY = Math.min(...trilhasAtivas.map((t) => t.centro[1]));
     const maiorY = Math.max(...trilhasAtivas.map((t) => t.centro[1]));
 
+    const modeloAtivo = vocabularioAtivoRef.current === 'expandido' ? modeloExpandido : modeloLocal;
+    const usarExpandido = modeloAtivo.quantidade_caracteristicas === 132;
+
     const avaliacoes = trilhasAtivas.map((trilha) => {
-      const caracteristicas = montarVetorTemporal(trilha.quadros);
-      const res = preverModeloLocal(modeloLocal, caracteristicas);
+      const caracteristicas = usarExpandido
+        ? montarVetorTemporalExpandido(trilha.quadros)
+        : montarVetorTemporal(trilha.quadros);
+      const res = preverModeloLocal(modeloAtivo, caracteristicas);
       const emMov = caracteristicas[104] >= 0.28 || Math.max(caracteristicas[100], caracteristicas[101]) >= 0.24;
       let prioridade = res.confianca;
       if (trilhasAtivas.length > 1) {
         if (maiorY - menorY > 0.14 && trilha.centro[1] <= menorY + 0.02) prioridade += 0.08;
+        if (usarExpandido && caracteristicas[118] > 0.25 && maiorY - menorY > 0.10 && trilha.centro[1] <= menorY + 0.02) {
+          prioridade += 0.08;
+        }
         if (emMov) prioridade += 0.14;
       }
       return {
@@ -562,7 +902,8 @@ function AplicativoPrincipal() {
     votacoes.push(resultado);
     if (votacoes.length > 3) votacoes.shift();
 
-    const { predicao, mediaConf } = escolherRotuloVotacao(votacoes);
+    const { predicao: predicaoBase, mediaConf } = escolherRotuloVotacao(votacoes);
+    const predicao = predicaoBase;
 
     if (predicao) {
       const confPct = Math.round(mediaConf * 100);
@@ -573,26 +914,33 @@ function AplicativoPrincipal() {
       setConfianca((atual) => (atual === 0 ? atual : 0));
     }
 
-    if (gravandoGestoRef.current && predicao && mediaConf >= 0.40) {
-      const anterior = melhorPredicaoGestoRef.current;
-      const contagem = anterior.rotulo === predicao ? anterior.contagem + 1 : 1;
-      if (mediaConf >= anterior.conf || contagem > anterior.contagem) {
-        melhorPredicaoGestoRef.current = {
-          rotulo: predicao,
-          conf: mediaConf,
-          contagem,
-        };
-      }
+    if (gravandoGestoRef.current && predicaoBase && mediaConf >= 0.36) {
+      const acumulador = acumuladorGestoRef.current;
+      const reg = acumulador[predicaoBase] || {
+        soma: 0,
+        somaConf: 0,
+        maxConf: 0,
+        contagem: 0,
+        primeiroInstante: agoraMs,
+        ultimoInstante: agoraMs,
+      };
+      const pesoMaturidade = Math.min(1.0, bufferAtual / 4.0);
+      reg.soma += mediaConf * pesoMaturidade;
+      reg.somaConf += mediaConf;
+      if (mediaConf > reg.maxConf) reg.maxConf = mediaConf;
+      reg.contagem += 1;
+      reg.ultimoInstante = agoraMs;
+      acumulador[predicaoBase] = reg;
     }
 
-    if (!gravandoGestoRef.current && predicao && mediaConf >= 0.48) {
+    if (!gravandoGestoRef.current && predicao && mediaConf >= 0.50) {
       if (predicao === ultimaLetraRef.current) {
         contagemEstavelRef.current += 1;
       } else {
         ultimaLetraRef.current = predicao;
         contagemEstavelRef.current = 1;
       }
-      const prontoInserir = contagemEstavelRef.current >= 2 || (mediaConf >= 0.66 && bufferAtual >= 3);
+      const prontoInserir = bufferAtual >= 4 && contagemEstavelRef.current >= 3;
       if (prontoInserir && ultimoSinalInseridoRef.current !== predicao) {
         adicionarAoTexto(predicao);
         ultimoSinalInseridoRef.current = predicao;
@@ -642,7 +990,7 @@ function AplicativoPrincipal() {
     limparHistoricoPredicao();
     gravandoGestoRef.current = true;
     setGravandoGesto(true);
-    melhorPredicaoGestoRef.current = { rotulo: '', conf: 0, contagem: 0 };
+    acumuladorGestoRef.current = {};
     setLetraAtual('Gravando sinal...');
     setTempoGestoRestante(2.5);
 
@@ -661,11 +1009,27 @@ function AplicativoPrincipal() {
         setGravandoGesto(false);
         setTempoGestoRestante(0);
 
-        const melhor = melhorPredicaoGestoRef.current;
-        if (melhor.rotulo && melhor.conf >= 0.42) {
-          adicionarAoTexto(melhor.rotulo);
-          setLetraAtual(melhor.rotulo);
-          setConfianca(Math.round(melhor.conf * 100));
+        const acumulador = acumuladorGestoRef.current;
+        let melhorRotulo = '';
+        let melhorReg = null;
+        for (const [rotulo, reg] of Object.entries(acumulador)) {
+          const valido = reg.contagem >= 2 || reg.maxConf >= 0.48;
+          if (!valido) continue;
+          if (!melhorReg || reg.soma > melhorReg.soma) {
+            melhorRotulo = rotulo;
+            melhorReg = reg;
+          }
+        }
+
+        historicoLocalRef.current = [];
+        votacoesModeloRef.current = [];
+        ultimaLetraRef.current = '';
+        contagemEstavelRef.current = 0;
+        if (melhorRotulo && melhorReg) {
+          const confFinal = Math.max(melhorReg.somaConf / melhorReg.contagem, melhorReg.maxConf * 0.9);
+          adicionarAoTexto(melhorRotulo);
+          setLetraAtual(melhorRotulo);
+          setConfianca(Math.round(confFinal * 100));
         } else {
           setLetraAtual('Sinal nao reconhecido');
           setConfianca(0);
@@ -688,14 +1052,15 @@ function AplicativoPrincipal() {
   }
 
   function limparTexto() {
-    setTextoCompleto('');
+    atualizarTextoCompleto('');
+    temposInsercaoRef.current = {};
     setLetraAtual('-');
     setConfianca(0);
     limparHistoricoPredicao();
   }
 
   function adicionarEspaco() {
-    setTextoCompleto((anterior) => `${anterior} `);
+    atualizarTextoCompleto(`${textoCompletoRef.current} `);
   }
 
   if (!permissao) {
@@ -728,7 +1093,16 @@ function AplicativoPrincipal() {
         <View style={estilos.cabecalho}>
           <Text style={estilos.titulo}>Tradutor de Libras</Text>
           <View style={estilos.linhaStatus}>
-            <Text style={estilos.rotuloStatus}>Modo: Local Offline</Text>
+            <TouchableOpacity
+              onPress={alternarVocabulario}
+              activeOpacity={0.6}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              disabled={contagemRegressiva > 0 || gravandoGesto}
+            >
+              <Text style={estilos.rotuloStatus}>
+                Vocabulario: {vocabularioAtivo === 'expandido' ? 'Expandido (Offline)' : 'Padrao (Offline)'}
+              </Text>
+            </TouchableOpacity>
             <Text style={estilos.rotuloStatus}>Buffer: {quadrosBuffer}/9 quadros</Text>
           </View>
           <View style={estilos.linhaStatus}>
@@ -800,8 +1174,8 @@ function AplicativoPrincipal() {
               {contagemRegressiva > 0
                 ? `Prepare-se (${contagemRegressiva}s)...`
                 : gravandoGesto
-                ? `Gravando Gesto... (${tempoGestoRestante}s)`
-                : 'Gravar Gesto Longo (2.5s)'}
+                  ? `Gravando Gesto... (${tempoGestoRestante}s)`
+                  : 'Gravar Gesto Longo (2.5s)'}
             </Text>
           </TouchableOpacity>
 
@@ -818,7 +1192,7 @@ function AplicativoPrincipal() {
           <View style={estilos.linhaBotoes}>
             <TouchableOpacity
               style={estilos.botaoAcao}
-              onPress={() => adicionarAoTexto(letraAtual)}
+              onPress={() => adicionarAoTexto(letraAtual, true)}
             >
               <Text style={estilos.textoBotaoAcao}>+ Frase</Text>
             </TouchableOpacity>

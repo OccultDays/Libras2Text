@@ -1,3 +1,4 @@
+from collections import Counter
 import csv
 import os
 import joblib
@@ -25,9 +26,38 @@ def carregar_csv(caminho):
     return rotulos, caracteristicas
 
 
+def carregar_csv_videos(caminho):
+    rotulos = []
+    caracteristicas = []
+    if not os.path.exists(caminho):
+        return rotulos, caracteristicas
+    with open(caminho, "r", encoding="utf-8") as arquivo:
+        leitor = csv.reader(arquivo)
+        next(leitor, None)
+        for linha in leitor:
+            if not linha or len(linha) != TOTAL_CARACTERISTICAS + 2:
+                continue
+            rotulos.append(linha[0])
+            caracteristicas.append([float(v) for v in linha[2:]])
+    return rotulos, caracteristicas
+
+
+def calcular_pesos_hibridos(rotulos_sint, rotulos_videos, peso_real_por_classe=120.0):
+    pesos_sint = np.ones(len(rotulos_sint), dtype=np.float64)
+    if not rotulos_videos:
+        return pesos_sint
+    contagens = Counter(rotulos_videos)
+    pesos_videos = []
+    for r in rotulos_videos:
+        alvo = 70.0 if r in ("DIA_ROSTO", "DIA_SOL", "NEUTRO") else peso_real_por_classe
+        pesos_videos.append(min(3.0, alvo / max(contagens[r], 1)))
+    return np.concatenate([pesos_sint, np.array(pesos_videos, dtype=np.float64)])
+
+
 def treinar():
     diretorio_atual = os.path.dirname(os.path.abspath(__file__))
     caminho_real = os.path.join(diretorio_atual, "dataset_libras_real.csv")
+    caminho_videos = os.path.join(diretorio_atual, "dataset_videos_reais.csv")
     caminho_base = os.path.join(diretorio_atual, "dataset_libras.csv")
 
     criar_dataset()
@@ -36,19 +66,25 @@ def treinar():
     fonte_dados = "base_anatomica"
     rotulos = list(rotulos_base)
     caracteristicas = list(caract_base)
+    rotulos_videos, caract_videos = carregar_csv_videos(caminho_videos)
+
+    if rotulos_videos:
+        rotulos = rotulos + rotulos_videos
+        caracteristicas = caracteristicas + caract_videos
+        pesos = calcular_pesos_hibridos(rotulos_base, rotulos_videos)
+        fonte_dados = "hibrido_videos_reais"
+        print(f"Integrando {len(rotulos_videos)} janelas reais extraidas de videos ({len(set(rotulos_videos))} sinais).")
+    else:
+        pesos = np.ones(len(rotulos), dtype=np.float64)
 
     if os.path.exists(caminho_real):
         rotulos_reais, caract_reais = carregar_csv(caminho_real)
         if rotulos_reais:
-            classes_reais = set(rotulos_reais)
-            filtrados = [
-                (r, c) for r, c in zip(rotulos_base, caract_base)
-                if r not in classes_reais
-            ]
-            rotulos = [r for r, _ in filtrados] + rotulos_reais
-            caracteristicas = [c for _, c in filtrados] + caract_reais
-            fonte_dados = "real"
-            print(f"Integrando {len(rotulos_reais)} amostras reais coletadas ({len(classes_reais)} sinais).")
+            rotulos = rotulos + rotulos_reais
+            caracteristicas = caracteristicas + caract_reais
+            pesos = np.concatenate([pesos, np.full(len(rotulos_reais), 2.5, dtype=np.float64)])
+            fonte_dados = "hibrido_coleta_real"
+            print(f"Integrando {len(rotulos_reais)} amostras reais coletadas ({len(set(rotulos_reais))} sinais).")
 
     x = np.array(caracteristicas, dtype=np.float64)
     y = np.array(rotulos)
@@ -59,25 +95,25 @@ def treinar():
         raise ValueError(f"Grave pelo menos 2 exemplos para: {', '.join(insuficientes)}")
 
     fracao_teste = max(0.2, len(np.unique(y)) / len(y))
-    x_treino, x_teste, y_treino, y_teste = train_test_split(
-        x, y, test_size=fracao_teste, random_state=42, stratify=y
+    x_treino, x_teste, y_treino, y_teste, p_treino, _ = train_test_split(
+        x, y, pesos, test_size=fracao_teste, random_state=42, stratify=y
     )
 
     modelo = RandomForestClassifier(
-        n_estimators=75,
-        max_depth=16,
+        n_estimators=80,
+        max_depth=17,
         min_samples_leaf=2,
         random_state=42,
         n_jobs=-1,
     )
-    modelo.fit(x_treino, y_treino)
+    modelo.fit(x_treino, y_treino, sample_weight=p_treino)
 
     previsoes = modelo.predict(x_teste)
     acuracia = accuracy_score(y_teste, previsoes)
-    print(f"\nAcuracia na validacao: {acuracia * 100:.2f}%\n")
+    print(f"\nAcuracia interna (holdout misto): {acuracia * 100:.2f}%\n")
     print(classification_report(y_teste, previsoes))
 
-    modelo.fit(x, y)
+    modelo.fit(x, y, sample_weight=pesos)
     modelo.n_jobs = 1
     rotulos_unicos = sorted(list(set(y)))
 
@@ -93,6 +129,7 @@ def treinar():
 
     print(f"Modelo salvo em: {caminho_modelo}")
     print(f"Rotulos salvos em: {caminho_rotulos}")
+    print("Para validacao sem vazamento em videos reais, execute: python modelo/validar_videos_reais.py --validar-lovo")
 
 
 if __name__ == "__main__":

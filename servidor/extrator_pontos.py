@@ -13,6 +13,87 @@ def _limitar(valor, minimo, maximo):
     return max(minimo, min(maximo, float(valor)))
 
 
+def filtrar_maos_ativas(pontos_maos_3d, largura_quadro=480, altura_quadro=640, pontos_pose=None):
+    if not pontos_maos_3d:
+        return []
+
+    maior_lado = float(max(largura_quadro, altura_quadro, 1))
+    escala_x = float(largura_quadro) / maior_lado
+    escala_y = float(altura_quadro) / maior_lado
+
+    pose_valida = False
+    nariz_y = 0.0
+    larg_ombros = 0.30
+    if pontos_pose is not None and len(pontos_pose) >= 9:
+        try:
+            ny = float(pontos_pose[0][1]) * escala_y
+            oex = float(pontos_pose[7][0]) * escala_x
+            oey = float(pontos_pose[7][1]) * escala_y
+            odx = float(pontos_pose[8][0]) * escala_x
+            ody = float(pontos_pose[8][1]) * escala_y
+            if all(math.isfinite(v) for v in (ny, oex, oey, odx, ody)):
+                nariz_y = ny
+                larg_ombros = max(math.hypot(oex - odx, oey - ody), 0.12)
+                pose_valida = True
+        except Exception:
+            pose_valida = False
+
+    candidatas = []
+    for mao in pontos_maos_3d:
+        if mao is None or len(mao) != 21:
+            continue
+        raw_y = float(mao[0][1])
+        pulso_x = float(mao[0][0]) * escala_x
+        pulso_y = raw_y * escala_y
+        ind_y = float(mao[8][1]) * escala_y
+        if not (math.isfinite(pulso_x) and math.isfinite(pulso_y) and math.isfinite(ind_y)):
+            continue
+
+        soma_palma = 0.0
+        for idx_base in (5, 9, 13, 17):
+            dx = float(mao[idx_base][0]) * escala_x - pulso_x
+            dy = float(mao[idx_base][1]) * escala_y - pulso_y
+            soma_palma += math.hypot(dx, dy)
+        escala_mao = (soma_palma / 4.0) / 0.45
+        if escala_mao < 0.02:
+            continue
+
+        if pose_valida:
+            py = _limitar((pulso_y - nariz_y) / larg_ombros, -2.0, 2.5)
+            iy = _limitar((ind_y - nariz_y) / larg_ombros, -2.0, 2.5)
+            if py >= 1.35 and iy >= 1.28 and raw_y >= 0.80:
+                continue
+        else:
+            py = _limitar((raw_y - 0.30) * 2.0, -2.0, 2.5)
+
+        candidatas.append({
+            "mao": mao,
+            "py": py,
+            "raw_y": raw_y,
+            "escala_mao": escala_mao,
+        })
+
+    if len(candidatas) <= 1:
+        return [c["mao"] for c in candidatas]
+
+    candidatas.sort(key=lambda item: item["raw_y"])
+    alta = candidatas[0]
+    baixa = candidatas[1]
+    dif_py = baixa["py"] - alta["py"]
+    dx_ind = (float(alta["mao"][8][0]) - float(baixa["mao"][8][0])) * escala_x
+    dy_ind = (float(alta["mao"][8][1]) - float(baixa["mao"][8][1])) * escala_y
+    dist_ind = math.hypot(dx_ind, dy_ind) / max(alta["escala_mao"], 0.05)
+
+    baixa_em_repouso = (
+        (baixa["py"] >= 1.22 and dif_py >= 0.45 and dist_ind >= 1.10)
+        or (dif_py >= 0.65 and dist_ind >= 1.30)
+        or (baixa["raw_y"] >= 0.84 and dif_py >= 0.25 and dist_ind >= 1.10)
+    )
+    if baixa_em_repouso:
+        return [alta["mao"]]
+    return [alta["mao"], baixa["mao"]]
+
+
 def calcular_vetor_quadro(pontos_mao_3d, largura_quadro=480, altura_quadro=640, pontos_pose=None, outra_mao_3d=None):
     if pontos_mao_3d is None or len(pontos_mao_3d) != 21:
         return None
@@ -49,6 +130,14 @@ def calcular_vetor_quadro(pontos_mao_3d, largura_quadro=480, altura_quadro=640, 
         return None
 
     h = relativos / escala_mao
+    esc_ref = max(escala_mao, 0.05)
+    rel2d = (mao[:, :2] - pulso[:2]) / esc_ref
+    det_palma_bruto = float(rel2d[5, 0] * rel2d[17, 1] - rel2d[5, 1] * rel2d[17, 0])
+    ang_palma_sim = math.atan2(float(rel2d[9, 1]), abs(float(rel2d[9, 0])))
+    abs_det_palma = _limitar(abs(det_palma_bruto), 0.0, 1.5)
+    pol_rel = (float(rel2d[4, 0] - rel2d[5, 0]), float(rel2d[4, 1] - rel2d[5, 1]))
+    dist_pol_base_ind = _limitar(math.hypot(pol_rel[0], pol_rel[1]), 0.0, 2.5)
+
     det_palma = h[5, 0] * h[17, 1] - h[5, 1] * h[17, 0]
     if det_palma < 0.0:
         h[:, 0] *= -1.0
@@ -114,6 +203,14 @@ def calcular_vetor_quadro(pontos_mao_3d, largura_quadro=480, altura_quadro=640, 
     dist_pontas_med = 4.0
     dif_altura_pulsos = 0.0
     cos_palmas = 0.0
+    dist_pol_outra_palma = 4.0
+    dist_ind_outra_pulso = 4.0
+    dist_ind_outra_palma = 4.0
+    dx_pulsos_abs = 4.0
+    dy_pulsos_abs = 4.0
+    dif_curv_maos = 0.0
+    curv_outra = [0.0, 0.0, 0.0, 0.0, 0.0]
+    dx_pulsos_sinal = 0.0
 
     if outra_mao_3d is not None and len(outra_mao_3d) == 21:
         outra = np.zeros((21, 3), dtype=np.float64)
@@ -134,6 +231,29 @@ def calcular_vetor_quadro(pontos_mao_3d, largura_quadro=480, altura_quadro=640, 
             norma_ab = math.hypot(dir_a_x, dir_a_y) * math.hypot(dir_b_x, dir_b_y) + 1e-6
             cos_palmas = _limitar((dir_a_x * dir_b_x + dir_a_y * dir_b_y) / norma_ab, -1.0, 1.0)
 
+            rel_o = outra[:, :2] - outra[0, :2]
+            tam_o = float(
+                np.linalg.norm(rel_o[5])
+                + np.linalg.norm(rel_o[9])
+                + np.linalg.norm(rel_o[13])
+                + np.linalg.norm(rel_o[17])
+            ) / 4.0
+            esc_o = max(tam_o / 0.45, 0.05)
+            ho = rel_o / esc_o
+            for k, (a, b, c, d) in enumerate(cadeias):
+                v1 = ho[b] - ho[a]
+                v2 = ho[d] - ho[c]
+                norma_o = float(np.linalg.norm(v1) * np.linalg.norm(v2)) + 1e-6
+                curv_outra[k] = float(np.dot(v1, v2) / norma_o)
+            centro_palma_o = (outra[0, :2] + outra[5, :2] + outra[9, :2] + outra[17, :2]) * 0.25
+            dist_pol_outra_palma = _limitar(math.hypot(mao[4, 0] - centro_palma_o[0], mao[4, 1] - centro_palma_o[1]) / esc_ref, 0.0, 4.0)
+            dist_ind_outra_pulso = _limitar(math.hypot(mao[8, 0] - outra[0, 0], mao[8, 1] - outra[0, 1]) / esc_ref, 0.0, 4.0)
+            dist_ind_outra_palma = _limitar(math.hypot(mao[8, 0] - centro_palma_o[0], mao[8, 1] - centro_palma_o[1]) / esc_ref, 0.0, 4.0)
+            dx_pulsos_abs = _limitar(abs(mao[0, 0] - outra[0, 0]) / esc_ref, 0.0, 4.0)
+            dy_pulsos_abs = _limitar(abs(mao[0, 1] - outra[0, 1]) / esc_ref, 0.0, 4.0)
+            dif_curv_maos = sum(abs(valores[73 + k] - curv_outra[k]) for k in range(5)) / 5.0
+            dx_pulsos_sinal = _limitar((mao[0, 0] - outra[0, 0]) / esc_ref, -4.0, 4.0)
+
     valores.extend([
         tem_outra_mao,
         dist_pulsos,
@@ -143,12 +263,30 @@ def calcular_vetor_quadro(pontos_mao_3d, largura_quadro=480, altura_quadro=640, 
         cos_palmas,
     ])
 
+    extras_quadro = [
+        ang_palma_sim,
+        abs_det_palma,
+        dist_pol_base_ind,
+        dist_pol_outra_palma,
+        dist_ind_outra_pulso,
+        dist_ind_outra_palma,
+        dx_pulsos_abs,
+        dy_pulsos_abs,
+        dif_curv_maos,
+    ] + curv_outra
+
     return {
         "vetor": np.array(valores, dtype=np.float64),
         "pontos_ref": pontos_ref,
         "centro": (float(pontos_mao_3d[0][0]), float(pontos_mao_3d[0][1])),
         "escala_mao": escala_mao,
         "instante": time.monotonic(),
+        "extras_quadro": extras_quadro,
+        "det_palma": det_palma_bruto,
+        "pol_rel": pol_rel,
+        "dx_pulsos_sinal": dx_pulsos_sinal,
+        "dist_ind_outra_pulso": dist_ind_outra_pulso,
+        "tem_outra": tem_outra_mao,
     }
 
 
@@ -203,11 +341,20 @@ def montar_vetor_temporal(historico):
     vetor_base = atual["vetor"].copy()
     n_hist = len(historico)
     if len(vetor_base) >= 98 and vetor_base[92] < 0.5 and n_hist >= 2:
+        recuperou = False
         for idx_ant in range(n_hist - 2, max(-1, n_hist - 4), -1):
             anterior = historico[idx_ant]
             if len(anterior["vetor"]) >= 98 and anterior["vetor"][92] > 0.5:
                 vetor_base[92:98] = anterior["vetor"][92:98]
+                recuperou = True
                 break
+        if not recuperou:
+            for idx_ant in range(n_hist - 4, -1, -1):
+                anterior = historico[idx_ant]
+                va = anterior["vetor"]
+                if len(va) >= 98 and va[92] > 0.5 and (va[94] <= 0.85 or va[93] <= 1.25):
+                    vetor_base[92:98] = va[92:98]
+                    break
 
     delta_dedos = (atual["vetor"][63:68] - primeiro["vetor"][63:68]).tolist()
     movimento = np.array(
@@ -215,6 +362,59 @@ def montar_vetor_temporal(historico):
         dtype=np.float64,
     )
     return np.concatenate([vetor_base, movimento])
+
+
+def montar_vetor_temporal_expandido(historico):
+    v110 = montar_vetor_temporal(historico)
+    atual = historico[-1]
+    ex_q = list(atual["extras_quadro"])
+
+    if v110[92] > 0.5 and atual["tem_outra"] < 0.5:
+        for ant in reversed(historico[:-1]):
+            if ant["tem_outra"] > 0.5:
+                ex_q[3:14] = ant["extras_quadro"][3:14]
+                break
+
+    dets = [item["det_palma"] for item in historico]
+    amp_det_palma = _limitar(max(dets) - min(dets), 0.0, 2.0)
+    flip_det_palma = 1.0 if (min(dets) < -0.03 and max(dets) > 0.03) else 0.0
+
+    pols = [item["pol_rel"] for item in historico]
+    energia_pol_rel = 0.0
+    for k in range(1, len(pols)):
+        energia_pol_rel += math.hypot(pols[k][0] - pols[k - 1][0], pols[k][1] - pols[k - 1][1])
+    energia_pol_rel = min(4.0, energia_pol_rel)
+    pxs = [p[0] for p in pols]
+    pys = [p[1] for p in pols]
+    amp_pol_rel = min(3.0, math.hypot(max(pxs) - min(pxs), max(pys) - min(pys)))
+
+    com_outra = [item for item in historico if item["tem_outra"] > 0.5]
+    if len(com_outra) >= 2:
+        dxs = [item["dx_pulsos_sinal"] for item in com_outra]
+        amp_dx_pulsos = min(4.0, max(dxs) - min(dxs))
+        cruzou_pulsos_x = 1.0 if (min(dxs) < -0.15 and max(dxs) > 0.15) else 0.0
+        energia_ind_pulso = 0.0
+        for k in range(1, len(com_outra)):
+            energia_ind_pulso += abs(com_outra[k]["dist_ind_outra_pulso"] - com_outra[k - 1]["dist_ind_outra_pulso"])
+        energia_ind_pulso = min(4.0, energia_ind_pulso)
+    else:
+        amp_dx_pulsos = 0.0
+        cruzou_pulsos_x = 0.0
+        energia_ind_pulso = 0.0
+
+    min_dist_pol_palma = min(item["extras_quadro"][3] for item in com_outra) if com_outra else ex_q[3]
+
+    extras_t = [
+        amp_det_palma,
+        flip_det_palma,
+        energia_pol_rel,
+        amp_pol_rel,
+        amp_dx_pulsos,
+        cruzou_pulsos_x,
+        energia_ind_pulso,
+        min_dist_pol_palma,
+    ]
+    return np.concatenate([v110, np.array(ex_q + extras_t, dtype=np.float64)])
 
 
 class ExtratorPontos:
@@ -367,8 +567,9 @@ class ExtratorPontos:
             pontos_brutos_maos.append(brutos_2d)
             pontos_maos_3d.append(brutos_3d)
 
-        for idx, brutos_3d in enumerate(pontos_maos_3d):
-            outra_3d = pontos_maos_3d[1 - idx] if len(pontos_maos_3d) == 2 else None
+        maos_ativas_3d = filtrar_maos_ativas(pontos_maos_3d, largura, altura, pontos_brutos_pose)
+        for idx, brutos_3d in enumerate(maos_ativas_3d):
+            outra_3d = maos_ativas_3d[1 - idx] if len(maos_ativas_3d) == 2 else None
             q = calcular_vetor_quadro(brutos_3d, largura, altura, pontos_brutos_pose, outra_3d)
             if q is not None:
                 quadros_maos.append(q)
